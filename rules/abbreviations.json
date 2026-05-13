@@ -1,0 +1,12 @@
+{
+  "Management": "Mgmt",
+  "Department": "Dept",
+  "Financial": "Fin",
+  "International": "Intl",
+  "Document": "Doc",
+  "Project": "Proj",
+  "Account": "Acct",
+  "Administration": "Admin",
+  "Marketing": "Mktg",
+  "Development": "Dev"
+}

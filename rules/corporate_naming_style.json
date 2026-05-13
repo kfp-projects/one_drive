@@ -1,0 +1,28 @@
+{
+  "separator": " ",
+  "title_case": true,
+  "preserve_accents": true,
+  "max_length": 60,
+  "remove_duplicate_words": true,
+  "human_readable": true,
+  "forbidden_conversational_starters": [
+    "como fica",
+    "segue o",
+    "documento de",
+    "arquivo sobre",
+    "lista de"
+  ],
+  "redundant_suffixes": [
+    "final",
+    "copia",
+    "copy",
+    "atualizado",
+    "novo",
+    "v1",
+    "v2",
+    "versao"
+  ],
+  "protected_terms": [
+    "KFP"
+  ]
+}

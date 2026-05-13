@@ -1,0 +1,42 @@
+{
+  "technical_patterns": [
+    ".metadata",
+    ".plugins",
+    "AppData",
+    "node_modules",
+    "vendor",
+    "cache",
+    "__pycache__",
+    ".git",
+    ".svn",
+    ".idea",
+    ".vscode",
+    "bin",
+    "obj",
+    "logs",
+    "tmp",
+    "temp",
+    "Local Settings",
+    "Application Data"
+  ],
+  "temporary_extensions": [
+    ".tmp",
+    ".log",
+    ".bak",
+    ".old",
+    ".swp"
+  ],
+  "business_extensions": [
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+    ".xls",
+    ".doc",
+    ".csv",
+    ".txt",
+    ".jpg",
+    ".png",
+    ".msg"
+  ]
+}

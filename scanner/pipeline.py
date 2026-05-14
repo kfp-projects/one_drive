@@ -1,106 +1,86 @@
-import re
-import json
+"""
+Pipeline simplificado — delegador para o módulo de conformidade OneDrive.
+
+Toda a lógica de detecção/sugestão vive em remediation.onedrive_compliance.
+Este arquivo existe apenas como ponto de integração com scanner.py, mantendo
+a assinatura .process(name, full_path) que o scanner já espera.
+
+NOTA: o pipeline antigo aplicava transformações cosméticas (título, remoção
+de stop words, abreviações). Foi descontinuado em prol do princípio "só toca
+quando viola regra OneDrive concreta".
+"""
+
 import os
+import json
 from config import config
 from scanner.classifier import StructuralClassifier
-from services.semantic_naming_engine import SemanticNamingEngine
+from remediation.onedrive_compliance import analyze
+
 
 class PipelineSim:
     """
-    Simulates the AI skills using regex and python logic for local fast-processing.
-    This acts as a placeholder before true LLM integration.
+    Compatibilidade com a API do scanner.
+
+    .process(name, full_path) retorna o mesmo formato dict que o pipeline
+    antigo expunha, com os campos populados a partir da análise OneDrive.
     """
+
+    # Mapeamentos código → label usado em detected_problems no scanner record
+    VIOLATION_CODES = {
+        "A": "FILENAME_TOO_LONG",
+        "B": "PATH_TOO_LONG",
+        "C": "FORBIDDEN_CHARS",
+        "D": "RESERVED_NAME",
+        "E": "INVALID_EDGE_CHARS",
+        "F": "SUSPICIOUS_DOUBLE_EXT",
+    }
+
+    RISK_MAP = {"Baixo": "LOW", "Médio": "MEDIUM", "Alto": "HIGH"}
+
+    ACTION_MAP = {
+        "Renomear Automaticamente": "AUTO_RENAME",
+        "Sugerir Renomeação": "SUGGEST_RENAME",
+        "Sugerir Renomeação com Atenção": "SUGGEST_RENAME_CAUTION",
+        "Manter Original": "NONE",
+    }
+
     def __init__(self):
-        self.abbreviations = {}
-        self.forbidden_chars = []
         self.classifier = StructuralClassifier()
-        self.semantic_engine = SemanticNamingEngine(config.STYLE_GUIDE_PATH)
-        self._load_rules()
+        self.forbidden_chars = self._load_forbidden_chars()
 
-    def _load_rules(self):
+    def _load_forbidden_chars(self):
+        """Mantido por compatibilidade com scanner.py (que lê este atributo)."""
         try:
-            with open(os.path.join(config.RULES_DIR, "abbreviations.json"), 'r') as f:
-                self.abbreviations = json.load(f)
-            with open(os.path.join(config.RULES_DIR, "forbidden_chars.json"), 'r') as f:
-                self.forbidden_chars = json.load(f).get("forbidden", [])
-        except Exception as e:
-            print(f"Warning: Could not load rules for pipeline: {e}")
-
-    def normalize_name(self, name: str) -> str:
-        """Simulates normalize_name.md skill - Corporate Standard"""
-        base, ext = os.path.splitext(name)
-        
-        # Detect if user deliberately uses snake_case
-        prefers_snake_case = '_' in base and ' ' not in base
-        
-        # Remove emojis/special chars, internal dots, and commas
-        # Replace with space initially, we will fix the separator later
-        for char in ['~', '#', '%', '&', '*', '{', '}', '\\', ':', '<', '>', '?', '/', '|', '"', ',', '.']:
-            base = base.replace(char, ' ')
-            
-        # If it was snake_case, the previous step didn't touch '_' yet. 
-        # But we want to treat '_' as a separator too.
-        if not prefers_snake_case:
-            base = base.replace('_', ' ')
-            
-        # Remove (1), (2), - copy, - copia
-        base = re.sub(r'\(\d+\)', '', base)
-        base = re.sub(r'(?i)\s*-\s*copia', '', base)
-        base = re.sub(r'(?i)\s*-\s*copy', '', base)
-        
-        # Replace multiple spaces with one space, then trim
-        base = re.sub(r'\s+', ' ', base).strip()
-        
-        # Title Case as per corporate standard
-        base = base.title()
-        
-        # If snake_case was preferred, restore it
-        if prefers_snake_case:
-            base = base.replace(' ', '_')
-            
-        return base + ext
-
-
-    def abbreviation_engine(self, name: str) -> str:
-        """Simulates abbreviation_engine.md skill"""
-        base, ext = os.path.splitext(name)
-        
-        for word, abbrev in self.abbreviations.items():
-            pattern = re.compile(rf'\b{word}\b', re.IGNORECASE)
-            base = pattern.sub(abbrev, base)
-            
-        return base + ext
+            rules_path = os.path.join(config.RULES_DIR, "onedrive_rules.json")
+            with open(rules_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("forbidden_chars", [])
+        except Exception:
+            return ['"', '*', ':', '<', '>', '?', '/', '\\', '|', '#']
 
     def process(self, original_name: str, full_path: str) -> dict:
-        """Runs the simulated pipeline to generate a suggested name and semantic metadata"""
-        # 1. Structural Classification
+        """
+        Roda análise OneDrive e devolve dict com campos que o scanner usa.
+        """
+        # Classificação estrutural (cache, business doc, etc.) continua
         classification_data = self.classifier.classify(full_path)
-        
-        # 2. Technical Normalization
-        normalized = self.normalize_name(original_name)
-        base_norm, ext = os.path.splitext(normalized)
-        
-        # 3. Semantic Intelligence (Reduction & Styling)
-        semantic_result = self.semantic_engine.apply_corporate_style(base_norm, ext)
-        
-        # 4. Context Awareness (Remove redundancy with parent folders)
-        parent_dir = os.path.dirname(full_path)
-        final_suggested = self.semantic_engine.remove_context_redundancy(
-            semantic_result["suggested_name"], 
-            parent_dir
-        )
-        
-        # 5. Abbreviation Engine (Final polish)
-        suggested = self.abbreviation_engine(final_suggested)
-        
+        result = analyze(original_name, full_path)
+
+        violation_labels = [self.VIOLATION_CODES[v] for v in result["violacoes_detectadas"]]
+        risk_level = self.RISK_MAP.get(result["risco"], "NONE")
+        action = self.ACTION_MAP.get(result["acao"], "NONE")
+        confidence = result["confianca"].rstrip("%") if result["confianca"] else ""
+
         return {
-            "suggested_name": suggested,
+            "suggested_name": result["nome_sugerido"],
             "classification": classification_data["classification"],
             "structural_score": classification_data["score"],
-            "semantic_summary": semantic_result["semantic_summary"],
-            "confidence_score": semantic_result["confidence_score"],
-            "naming_reason": semantic_result["naming_reason"],
-            "context_analysis": f"Removed redundancy from parent path: {os.path.basename(parent_dir)}"
+            "semantic_summary": result["resumo_semantico"],
+            "confidence_score": confidence,
+            "naming_reason": result["motivo"],
+            "context_analysis": "",
+            # Campos novos da análise OneDrive (consumidos pelo scanner)
+            "_onedrive_violations": violation_labels,
+            "_onedrive_risk": risk_level,
+            "_onedrive_action": action,
+            "_onedrive_has_violation": result["tem_violacao"],
         }
-
-

@@ -24,73 +24,51 @@ class SemanticNamingEngine:
     def apply_corporate_style(self, name: str, extension: str) -> Dict[str, Any]:
         """
         Applies local heuristics to clean and style the name.
+        Case is preserved: only structural fixes (stop words, redundant suffixes,
+        length, forbidden chars handled upstream) are applied.
         """
-        # 0. Initial Clean (Remove conversational starters from style guide)
-        clean_name = name.lower()
+        original_input = name
+
+        # 0. Remove conversational starters (case-insensitive match, preserve rest)
         starters = self.style.get("forbidden_conversational_starters", [])
         for starter in starters:
-            if clean_name.startswith(starter.lower()):
-                clean_name = clean_name[len(starter):].strip()
-        
-        # 1. Title Case
-        name = clean_name.title()
-        
-        # 2. Local Stop word removal (Heuristic)
+            if name.lower().startswith(starter.lower()):
+                name = name[len(starter):].strip()
+
+        # 1. Stop word removal (case-insensitive comparison, preserve case)
         words = name.split()
-        clean_words = []
-        for word in words:
-            # Check if word (lowered) is a stop word
-            if word.lower() not in self.stop_words:
-                clean_words.append(word)
-        
-        # If all words removed (unlikely), keep original
+        clean_words = [w for w in words if w.lower() not in self.stop_words]
         if not clean_words:
             clean_words = words
-            
-        # 3. Join with separator
+
+        # 2. Join with separator
         new_name = self.style.get("separator", " ").join(clean_words)
-        
-        # 4. Remove redundant suffixes/prefixes from style guide
+
+        # 3. Remove redundant suffixes/prefixes (case-insensitive)
         for pattern in self.style.get("redundant_suffixes", []):
-            # Case insensitive replace of full words
             new_name = re.sub(rf'\b{pattern}\b', '', new_name, flags=re.IGNORECASE)
 
-        # 5. Max length enforcement
+        # 4. Max length enforcement
         max_len = self.style.get("max_length", 60)
         if len(new_name) > max_len:
-            # Try to cut at last space
             if ' ' in new_name[:max_len]:
                 new_name = new_name[:max_len].rsplit(' ', 1)[0]
             else:
                 new_name = new_name[:max_len]
-            
-        # 6. Cleanup
+
+        # 5. Whitespace cleanup
         new_name = re.sub(r'\s+', ' ', new_name).strip()
-        
-        # 7. Restore Protected Terms Casing
-        protected = self.style.get("protected_terms", [])
-        for term in protected:
-            # Match term even if it's followed by state code or preceded/followed by underscores
-            # Catch KFP at start of word/string or after separator
-            pattern = rf'({term})([A-Za-z]{{2}})?'
-            
-            def restore_case(match):
-                prefix = match.group(1).upper()
-                suffix = match.group(2).upper() if match.group(2) else ""
-                return prefix + suffix
 
-            new_name = re.sub(pattern, restore_case, new_name, flags=re.IGNORECASE)
-
-        # 8. Final Name with Extension
         final_name = f"{new_name}{extension}"
+        name = original_input  # keep confidence comparison against original input
 
 
         
         return {
             "suggested_name": final_name,
-            "semantic_summary": "Extracted core business subject and removed conversational noise.",
+            "semantic_summary": "Extraído o tema corporativo principal e removidos ruídos coloquiais.",
             "confidence_score": self._calculate_confidence(name, new_name),
-            "naming_reason": "Corporate Semantic Standard"
+            "naming_reason": "Padrão Semântico Corporativo"
         }
 
     def remove_context_redundancy(self, name: str, parent_path: str) -> str:

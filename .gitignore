@@ -12,4 +12,5 @@ test_dir/
 test_remediation/
 .vscode/
 .idea/
+.claude/
 *.log

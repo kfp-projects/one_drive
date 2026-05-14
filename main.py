@@ -15,15 +15,12 @@ from utils.cleanup import cleanup_old_results
 # Setup main logger
 logger = setup_logger("main")
 
-def main():
+def run_pipeline(root_to_scan: str = "."):
     logger.info("=== Corporate Document Sanitation System V1 - PIPELINE START ===")
     
     # Cleanup Phase
     cleanup_old_results()
 
-    
-    # Target Configuration
-    root_to_scan = input("Enter the path to scan (default is current dir): ") or "."
     logger.info(f"Target directory: {root_to_scan}")
     
     if config.DRY_RUN:
@@ -74,9 +71,7 @@ def main():
     media_manager.generate_manifest(manifest_file)
     
     if not config.DRY_RUN and media_move_plan:
-        confirm = input(f"Proceed with moving {len(media_move_plan)} media files? (y/N): ")
-        if confirm.lower() == 'y':
-            media_manager.execute_move()
+        logger.info(f"Ready to move {len(media_move_plan)} media files. Waiting for API trigger.")
     
     # Summary
     logger.info("=== Execution Summary ===")
@@ -87,9 +82,61 @@ def main():
     logger.info(f"Forbidden Chars: {stats['forbidden_chars']}")
     logger.info(f"Possible Duplicates: {stats['duplicates']}")
     
-    print(f"\n[!] Execution finished successfully.")
-    print(f"[!] CSV Report: {csv_report}")
-    print(f"[!] JSON Report: {json_report}")
+    logger.info("[!] Execution finished successfully.")
+    
+    media_breakdown, media_files = categorize_media(media_move_plan or [])
+
+    return {
+        "stats": stats,
+        "reports": {
+            "csv": csv_report,
+            "json": json_report
+        },
+        "media_move_plan_count": len(media_move_plan) if media_move_plan else 0,
+        "media_breakdown": media_breakdown,
+        "media_files": media_files
+    }
+
+
+MEDIA_CATEGORIES = {
+    "imagens": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"},
+    "audio":   {".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a"},
+    "video":   {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv"},
+}
+
+
+def categorize_media(move_plan):
+    summary = {key: {"count": 0, "extensions": {}} for key in MEDIA_CATEGORIES}
+    summary["outros"] = {"count": 0, "extensions": {}}
+    files = []
+
+    for item in move_plan:
+        ext = (item.get("extension") or "").lower()
+        bucket = "outros"
+        for category, exts in MEDIA_CATEGORIES.items():
+            if ext in exts:
+                bucket = category
+                break
+        summary[bucket]["count"] += 1
+        summary[bucket]["extensions"][ext] = summary[bucket]["extensions"].get(ext, 0) + 1
+
+        files.append({
+            "category": bucket,
+            "name": item.get("file_name"),
+            "path": item.get("original_path"),
+            "extension": ext,
+            "source_folder": item.get("source_folder")
+        })
+
+    return summary, files
+
+def execute_media_move(root_to_scan: str):
+    media_manager = MediaManager(root_to_scan)
+    scanner = ScannerService(root_dir=root_to_scan)
+    scanner.scan_directory()
+    media_manager.plan_offload(scanner.records)
+    media_manager.execute_move()
+    return True
 
 if __name__ == "__main__":
-    main()
+    run_pipeline(".")

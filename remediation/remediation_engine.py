@@ -31,7 +31,7 @@ class RemediationEngine:
                 "full_path": record["full_path"],
                 "action": action,
                 "confidence": record.get("confidence_score", 0),
-                "reason": record.get("naming_reason", "Standard remediation"),
+                "reason": record.get("naming_reason", "Remediação padrão"),
                 "classification": record.get("classification", "UNKNOWN"),
                 "risk_score": record.get("risk_level", "LOW")
             }

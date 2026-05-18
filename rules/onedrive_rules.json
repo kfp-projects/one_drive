@@ -1,0 +1,21 @@
+{
+  "_doc": "Regras oficiais de conformidade OneDrive/SharePoint (Microsoft Learn, 2025). Fonte única da verdade — qualquer mudança nos limites do OneDrive deve ser feita aqui.",
+  "max_filename_length": 255,
+  "max_path_length": 400,
+  "margem_seguranca_nome": 5,
+  "margem_seguranca_path": 5,
+  "min_useful_base_chars": 10,
+  "forbidden_chars": ["\"", "*", ":", "<", ">", "?", "/", "\\", "|", "#"],
+  "reserved_names_exact": [
+    ".lock",
+    "CON", "PRN", "AUX", "NUL",
+    "desktop.ini"
+  ],
+  "reserved_prefixes": ["~$"],
+  "reserved_substrings": ["_vti_"],
+  "reserved_regex": ["^(COM[0-9]|LPT[0-9])$"],
+  "edge_chars": [" ", ".", "~"],
+  "_doc_F": "Regra F: dupla extensão suspeita. Padrões tipo nome.xl.xlsx ou foto.jpg.exe sinalizam typo ou disfarce. Whitelist abaixo lista extensões COMPOSTAS legítimas que NÃO devem ser tocadas.",
+  "double_extension_whitelist": [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"],
+  "max_inner_extension_chars": 5
+}

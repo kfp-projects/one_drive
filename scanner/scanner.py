@@ -20,7 +20,7 @@ class ScannerService:
         self.root_dir = Path(root_dir)
         self.records: List[Dict[str, Any]] = []
         self.pipeline = PipelineSim()
-        
+
         self.stats = {
             "total_files": 0,
             "total_folders": 0,
@@ -29,142 +29,129 @@ class ScannerService:
             "duplicates": 0,
             "excessive_depth": 0
         }
-        
+
         self.forbidden_chars = self.pipeline.forbidden_chars
-        self._file_hashes: Dict[str, str] = {} # "name_size" -> path
+        self._file_hashes: Dict[str, str] = {}
+
+        self.frozen_folders, self.frozen_files = self._load_frozen_items()
+
+    def _load_frozen_items(self):
+        try:
+            with open(config.FROZEN_ITEMS_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                folders = {x.lower() for x in data.get("frozen_folders", [])}
+                files = {x.lower() for x in data.get("frozen_files", [])}
+                return folders, files
+        except Exception as e:
+            logger.warning(f"Could not load frozen_items.json: {e}")
+            return set(), set()
 
     def scan_directory(self):
         """Recursively scans the directory and records issues."""
         logger.info(f"Starting scan in: {self.root_dir}")
-        
+
+        # Pré-computa o set em lowercase pra comparação case-insensitive —
+        # pega "Backup de Imagens" / "BACKUP DE IMAGENS" / etc.
+        ignored_lower = {x.lower() for x in config.IGNORED_FOLDERS}
+
         for root, dirs, files in os.walk(self.root_dir):
             root_path = Path(root)
-            
-            # Reset folder registry for each directory to detect collisions locally
-            folder_registry = {} # suggested_name -> original_name
-            
-            # Remove ignored folders to prevent walking into them
-            dirs[:] = [d for d in dirs if d not in config.IGNORED_FOLDERS]
 
-            # Analyze directories
+            # Remove ignored folders to prevent walking into them (case-insensitive)
+            dirs[:] = [d for d in dirs if d.lower() not in ignored_lower]
+
             for d in dirs:
                 self.stats["total_folders"] += 1
                 if self.stats["total_folders"] % 1000 == 0:
                     logger.info(f"Progress: Scanned {self.stats['total_folders']} folders...")
-                self._analyze_path(root_path / d, is_dir=True, folder_registry=folder_registry)
+                self._analyze_path(root_path / d, is_dir=True)
 
-            # Analyze files
             for f in files:
                 file_path = root_path / f
                 if file_path.suffix.lower() in config.IGNORED_EXTENSIONS:
                     continue
-                    
                 self.stats["total_files"] += 1
                 if self.stats["total_files"] % 5000 == 0:
                     logger.info(f"Progress: Scanned {self.stats['total_files']} files...")
-                self._analyze_path(file_path, is_dir=False, folder_registry=folder_registry)
+                self._analyze_path(file_path, is_dir=False)
                 
         logger.info("Scan completed.")
         return self.stats
 
-    def _analyze_path(self, path: Path, is_dir: bool, folder_registry: Dict[str, str]):
+    def _analyze_path(self, path: Path, is_dir: bool):
+        """
+        Coleta metadados e delega a análise para o pipeline (conformidade OneDrive).
+        Pasta/arquivo em conformidade resulta em sugestão == original e
+        action_required == "NONE" — não geramos sugestões cosméticas.
+        """
         path_str = str(path)
         name = path.name
-        issues = []
-        risk_level = "LOW"
-        
-        # 1. Path length check
         path_length = len(path_str)
-        if path_length > config.MAX_PATH_LENGTH:
-            self.stats["long_paths"] += 1
-            issues.append(f"LONG_PATH ({path_length} > {config.MAX_PATH_LENGTH})")
-            risk_level = "CRITICAL"
 
-        # 2. Depth check
+        # --- Métricas informativas para o analytics (NÃO viram violação) -----
         depth = len(path.relative_to(self.root_dir).parts)
         if depth > config.MAX_DEPTH:
             self.stats["excessive_depth"] += 1
-            issues.append(f"EXCESSIVE_DEPTH ({depth})")
-            if risk_level != "CRITICAL": risk_level = "HIGH"
 
-        # 3. Forbidden characters
-        found_chars = [c for c in self.forbidden_chars if c in name]
-        if found_chars:
-            self.stats["forbidden_chars"] += 1
-            issues.append(f"FORBIDDEN_CHARS ({''.join(found_chars)})")
-            if risk_level not in ["CRITICAL", "HIGH"]: risk_level = "MEDIUM"
-
-        # 4. Duplicate Check (Simple Name + Size hash for files)
+        # Duplicata (informativa apenas — OneDrive permite nomes duplicados em
+        # pastas diferentes; nem deduplica nem gera violação)
         if not is_dir:
             try:
                 file_info = f"{name}_{path.stat().st_size}"
                 if file_info in self._file_hashes:
                     self.stats["duplicates"] += 1
-                    issues.append("POSSIBLE_DUPLICATE")
-                    if risk_level not in ["CRITICAL", "HIGH", "MEDIUM"]: risk_level = "MEDIUM"
                 else:
                     self._file_hashes[file_info] = path_str
             except OSError:
-                pass 
+                pass
 
-        # 5. Pipeline suggestion & Classification
+        # --- Análise de conformidade OneDrive (única fonte de violação) ------
         pipeline_result = self.pipeline.process(name, path_str)
+        violation_codes = pipeline_result.get("_onedrive_violations", [])
         suggested_name = pipeline_result["suggested_name"]
-        classification = pipeline_result["classification"]
-        structural_score = pipeline_result["structural_score"]
+        risk_level = pipeline_result.get("_onedrive_risk", "NONE") or "NONE"
+        action_required = pipeline_result.get("_onedrive_action", "NONE") or "NONE"
 
-        # 6. Conservative Naming: Check if change is actually needed
-        # Avoid changing if it's already "clean enough" (no forbidden chars, reasonable length, human readable)
-        is_clean_enough = not found_chars and len(name) < 50 and "_" not in name and "," not in name and ".." not in name
-        
-        if suggested_name != name and "POSSIBLE_DUPLICATE" not in issues:
-             # Calculate ratio based on base name only (ignore extension)
-             base_orig = os.path.splitext(name)[0]
-             base_sugg = os.path.splitext(suggested_name)[0]
-             reduction_ratio = len(base_sugg) / len(base_orig) if len(base_orig) > 0 else 1
-             
-             # Only suggest if it's not "clean enough" OR if reduction is significant
-             # OR if there are critical issues like forbidden chars (already covered by action_required logic)
-             if not is_clean_enough or reduction_ratio < 0.75:
-                 if not issues: issues.append("SUBOPTIMAL_NAME")
-             else:
-                 suggested_name = name # Revert suggestion
-                
-        # 7. Collision Detection (Inside the same folder)
-        if suggested_name != name:
-            # Check if suggested name already exists in this folder or is already planned for another file
-            root_path = path.parent
-            if suggested_name in folder_registry:
-                base, ext = os.path.splitext(suggested_name)
-                counter = 1
-                new_name = f"{base} ({counter}){ext}"
-                while new_name in folder_registry or (root_path / new_name).exists():
-                    counter += 1
-                    new_name = f"{base} ({counter}){ext}"
-                suggested_name = new_name
-                issues.append("NAME_COLLISION_RESOLVED")
-                risk_level = "MEDIUM"
-            
-            folder_registry[suggested_name] = name
+        # Stats alinhados às regras OneDrive
+        if "FILENAME_TOO_LONG" in violation_codes:
+            self.stats.setdefault("long_filenames", 0)
+            self.stats["long_filenames"] += 1
+        if "PATH_TOO_LONG" in violation_codes:
+            self.stats["long_paths"] += 1
+        if "FORBIDDEN_CHARS" in violation_codes:
+            self.stats["forbidden_chars"] += 1
+        if "RESERVED_NAME" in violation_codes:
+            self.stats.setdefault("reserved_names", 0)
+            self.stats["reserved_names"] += 1
+        if "INVALID_EDGE_CHARS" in violation_codes:
+            self.stats.setdefault("invalid_edges", 0)
+            self.stats["invalid_edges"] += 1
+        if "SUSPICIOUS_DOUBLE_EXT" in violation_codes:
+            self.stats.setdefault("double_ext", 0)
+            self.stats["double_ext"] += 1
 
+        # --- Frozen/shared: itens compartilhados não podem ser alterados -----
+        is_shared = False
+        if is_dir and name.lower() in self.frozen_folders:
+            is_shared = True
+        elif not is_dir and name.lower() in self.frozen_files:
+            is_shared = True
+        if is_shared:
+            suggested_name = name
+            action_required = "BLOCKED"
 
-        if not issues:
-            risk_level = "NONE"
-            
-        # Determine action
-        action_required = "RENAME" if issues and any(i in issues for i in ["LONG_PATH", "FORBIDDEN_CHARS", "NAME_COLLISION_RESOLVED"]) else ("SUGGEST_RENAME" if issues else "NONE")
-        
-        # Record
         self.records.append({
             "original_name": name,
             "full_path": path_str,
             "path_length": path_length,
             "extension": path.suffix if not is_dir else "DIR",
-            "detected_problems": "; ".join(issues),
-            "suggested_name": suggested_name if action_required != "NONE" else name,
+            "is_dir": is_dir,
+            "is_shared": is_shared,
+            "detected_problems": "; ".join(violation_codes),
+            "suggested_name": suggested_name,
             "risk_level": risk_level,
-            "classification": classification,
-            "structural_score": structural_score,
+            "classification": pipeline_result["classification"],
+            "structural_score": pipeline_result["structural_score"],
             "action_required": action_required,
             "semantic_summary": pipeline_result.get("semantic_summary", ""),
             "confidence_score": pipeline_result.get("confidence_score", ""),
@@ -181,13 +168,20 @@ class ScannerService:
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         
         fieldnames = [
-            "original_name", "full_path", "path_length", "extension", 
+            "original_name", "full_path", "path_length", "extension",
+            "is_dir", "is_shared",
             "detected_problems", "suggested_name", "risk_level",
-            "classification", "structural_score", 
+            "classification", "structural_score",
             "semantic_summary", "confidence_score", "naming_reason", "context_analysis"
         ]
         
-        filtered_records = [r for r in self.records if r["risk_level"] != "NONE"]
+        # Inclui itens compartilhados (frozen) mesmo sem violação, para que
+        # apareçam na listagem com o badge "Bloqueado" e o usuário saiba que
+        # existem mas não podem ser alterados.
+        filtered_records = [
+            r for r in self.records
+            if r["risk_level"] != "NONE" or r.get("is_shared")
+        ]
 
         # CSV Export
         try:

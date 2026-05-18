@@ -5,14 +5,28 @@ class Config:
     """
     Central configuration for the Corporate Document Sanitation System.
     """
-    # Thresholds
-    MAX_PATH_LENGTH: int = 255
-    MAX_FILENAME_LENGTH: int = 150
+    # OneDrive/SharePoint compliance thresholds (Microsoft Learn, 2025).
+    # Single source: rules/onedrive_rules.json. Constantes aqui são fallback.
+    MAX_FILENAME_LENGTH: int = 255
+    MAX_PATH_LENGTH: int = 400
+    MARGEM_SEGURANCA_NOME: int = 5
+    MARGEM_SEGURANCA_PATH: int = 5
+    MIN_USEFUL_BASE_CHARS: int = 10
+    # Informativo apenas — não viola OneDrive, mas é métrica útil para o analytics
     MAX_DEPTH: int = 10
 
     # Rules
     IGNORED_EXTENSIONS: Set[str] = {'.tmp', '.log', '.ini', '.db'}
-    IGNORED_FOLDERS: Set[str] = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
+    # Pastas que o scanner pula completamente — não entra, não conta.
+    # Inclui pastas técnicas (.git, etc.) e as pastas de backup criadas pelo
+    # próprio sistema (uma vez movido pra lá, é "já backupado", não é mídia
+    # pra remediar).
+    IGNORED_FOLDERS: Set[str] = {
+        '.git', 'node_modules', '__pycache__', '.venv', 'venv',
+        '_ARQUIVOS_PESADOS_MEDIA',
+        'backup de imagens',
+        'backup de audios',
+    }
 
     # Media Offloading
     MEDIA_EXTENSIONS: Set[str] = {

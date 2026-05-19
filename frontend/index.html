@@ -19,6 +19,7 @@
                 <a href="#" class="nav-link active" data-view="dashboard"><i class="ph ph-squares-four"></i> Dashboard</a>
                 <a href="#" class="nav-link" data-view="arquivos"><i class="ph ph-folder-notch"></i> Arquivos Escaneados</a>
                 <a href="#" class="nav-link" data-view="remediacao"><i class="ph ph-wrench"></i> Remediação</a>
+                <a href="#" class="nav-link" data-view="renomeacoes"><i class="ph ph-pencil-line"></i> Renomeações IA</a>
             </nav>
             <div class="sidebar-footer">
                 <p>Status: <span class="status-indicator">Online</span></p>
@@ -86,6 +87,14 @@
                             <div class="stat-info">
                                 <span class="stat-value" id="stat-forbidden">0</span>
                                 <span class="stat-label">Caracteres Proibidos</span>
+                            </div>
+                        </div>
+                        <div class="stat-card warning"
+                             title="Arquivos com nomes em formato de frase. Detectado por: mais de 50 caracteres, mais de 6 palavras, e presença de palavras de conexão (de, do, que, para, etc.).">
+                            <div class="stat-icon"><i class="ph ph-paragraph"></i></div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="stat-descriptive-names">0</span>
+                                <span class="stat-label">Nomes Descritivos Longos</span>
                             </div>
                         </div>
                     </div>
@@ -230,6 +239,95 @@
                     <p class="table-footer" id="media-count"></p>
                 </section>
             </div>
+
+            <!-- VIEW: Renomeações IA -->
+            <div class="view hidden" id="view-renomeacoes">
+                <section class="panel">
+                    <h3>Revisão de Sugestões de Renomeação</h3>
+                    <p class="panel-description">
+                        Gere sugestões de renome via Gemini Flash-Lite para os arquivos detectados como "Nomes Descritivos Longos".
+                        Cada sugestão precisa ser revisada manualmente antes de ser aplicada.
+                    </p>
+
+                    <div class="action-panel">
+                        <div class="action-info">
+                            <h4>Geração de Sugestões</h4>
+                            <p id="rename-source-info">Aguardando scan…</p>
+                        </div>
+                        <div class="action-buttons">
+                            <button id="btn-rename-sample" class="btn-secondary" disabled>
+                                <i class="ph ph-flask"></i> Gerar Amostra (50)
+                            </button>
+                            <button id="btn-rename-all" class="btn-primary" disabled>
+                                <i class="ph ph-sparkle"></i> Gerar Todas
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="rename-summary" id="rename-summary" style="display:none;">
+                        <div class="rename-summary-card">
+                            <span class="rename-summary-label">Total</span>
+                            <span class="rename-summary-value" id="rename-total">0</span>
+                        </div>
+                        <div class="rename-summary-card rename-pending">
+                            <span class="rename-summary-label">Pendentes</span>
+                            <span class="rename-summary-value" id="rename-pending">0</span>
+                        </div>
+                        <div class="rename-summary-card rename-approved">
+                            <span class="rename-summary-label">Aprovadas</span>
+                            <span class="rename-summary-value" id="rename-approved">0</span>
+                        </div>
+                        <div class="rename-summary-card rename-rejected">
+                            <span class="rename-summary-label">Recusadas</span>
+                            <span class="rename-summary-value" id="rename-rejected">0</span>
+                        </div>
+                        <div class="rename-summary-card rename-cost">
+                            <span class="rename-summary-label">API / Cache</span>
+                            <span class="rename-summary-value" id="rename-cost">0 / 0</span>
+                        </div>
+                    </div>
+
+                    <div class="filter-bar" id="rename-filter-bar" style="display:none;">
+                        <input type="text" id="rename-filter-search" placeholder="Buscar por nome original…">
+                        <select id="rename-filter-confidence">
+                            <option value="">Todas confianças</option>
+                            <option value="Alta">Alta</option>
+                            <option value="Media">Média</option>
+                            <option value="Baixa">Baixa</option>
+                        </select>
+                        <select id="rename-filter-status">
+                            <option value="">Todos status</option>
+                            <option value="pendente">Pendentes</option>
+                            <option value="aprovada">Aprovadas</option>
+                            <option value="recusada">Recusadas</option>
+                        </select>
+                        <button id="btn-rename-bulk-approve-alta" class="btn-secondary btn-small" type="button">
+                            <i class="ph ph-check-circle"></i> Aprovar Alta
+                        </button>
+                        <button id="btn-rename-bulk-reject-baixa" class="btn-secondary btn-small" type="button">
+                            <i class="ph ph-x-circle"></i> Recusar Baixa
+                        </button>
+                        <button id="btn-rename-export" class="btn-secondary btn-small" type="button">
+                            <i class="ph ph-download"></i> Exportar CSV
+                        </button>
+                        <button id="btn-rename-apply" class="btn-primary btn-small" type="button" disabled>
+                            <i class="ph ph-check"></i> Aplicar Aprovadas
+                        </button>
+                    </div>
+
+                    <div id="rename-empty" class="empty-state">
+                        <i class="ph ph-pencil-line"></i>
+                        <p>Nenhuma sugestão gerada. Rode "Gerar Amostra (50)" para começar.</p>
+                    </div>
+
+                    <div id="rename-loading" class="status-message hidden">
+                        <div class="spinner"></div>
+                        <span id="rename-loading-text">Gerando sugestões…</span>
+                    </div>
+
+                    <div id="rename-list" class="rename-list"></div>
+                </section>
+            </div>
         </main>
     </div>
 
@@ -322,29 +420,6 @@
                 </button>
                 <button class="btn-primary" id="btn-audio-confirm" type="button">
                     <i class="ph ph-arrow-right"></i> Mover para "backup de audios"
-                </button>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Modal de Confirmação / Alerta Genérico Premium -->
-    <div id="confirm-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
-        <div class="modal-card" style="width: min(500px, 100%);">
-            <div class="modal-header">
-                <h3 id="confirm-modal-title"><i class="ph ph-question"></i> Confirmação</h3>
-                <button class="modal-close" id="confirm-modal-close" type="button" aria-label="Fechar">
-                    <i class="ph ph-x"></i>
-                </button>
-            </div>
-            <div class="modal-body" style="padding: 24px; min-height: auto;">
-                <p id="confirm-modal-message" class="modal-body-intro" style="margin-bottom: 0; font-size: 15px; line-height: 1.6; color: var(--text-main);"></p>
-            </div>
-            <div class="modal-footer" style="padding: 16px 24px;">
-                <button class="btn-secondary" id="btn-confirm-cancel" type="button">
-                    Cancelar
-                </button>
-                <button class="btn-primary" id="btn-confirm-ok" type="button">
-                    Confirmar
                 </button>
             </div>
         </div>

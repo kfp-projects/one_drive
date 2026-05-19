@@ -650,6 +650,216 @@ def api_move_to_trash():
         "manifest_used": manifests[0],
     }
 
+# =============================================================================
+# Sugestões de renome para "nomes descritivos longos" via Gemini Flash-Lite
+# =============================================================================
+
+from remediation.rename_suggester import (
+    SuggestState, run_worker as run_rename_worker,
+    select_sample as rename_select_sample,
+    load_descriptive_files_from_latest_report,
+)
+from remediation.onedrive_compliance import analyze as onedrive_analyze
+
+_rename_state = SuggestState()
+
+
+def _ensure_no_classify_running() -> None:
+    """Bloqueio mútuo: classificação de imagens e sugestão de renome dividem
+    a mesma cota da API Gemini. Roda só um por vez."""
+    with _classify_lock:
+        if _classify_state.get("running"):
+            raise HTTPException(
+                409,
+                detail="Aguarde a classificação de imagens terminar antes de gerar sugestões de renomeação.",
+            )
+
+
+def _start_rename_worker(files: list[dict], mode: str) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(400, detail="GEMINI_API_KEY não configurada no .env")
+    if not files:
+        raise HTTPException(400, detail="Nenhum arquivo descritivo encontrado. Rode um scan primeiro.")
+
+    with _rename_state.lock:
+        if _rename_state.running:
+            raise HTTPException(409, detail="Já existe uma geração de sugestões em andamento.")
+        _rename_state.running = True
+        _rename_state.total = len(files)
+        _rename_state.done = 0
+        _rename_state.results = []
+        _rename_state.started_at = datetime.now().isoformat()
+        _rename_state.completed_at = None
+        _rename_state.error = None
+        _rename_state.cache_hits = 0
+        _rename_state.api_calls = 0
+        _rename_state.mode = mode
+
+    threading.Thread(
+        target=run_rename_worker,
+        args=(_rename_state, api_key, files, mode),
+        daemon=True,
+    ).start()
+
+    return {"status": "started", "total": len(files), "mode": mode}
+
+
+@app.post("/api/rename/suggest-sample")
+def rename_suggest_sample():
+    """Gera sugestões para uma amostra aleatória de 50 arquivos descritivos."""
+    _ensure_no_classify_running()
+    all_files = load_descriptive_files_from_latest_report()
+    sample = rename_select_sample(all_files, n=50)
+    return _start_rename_worker(sample, mode="sample")
+
+
+@app.post("/api/rename/suggest-all")
+def rename_suggest_all():
+    """Gera sugestões para TODOS os arquivos descritivos do último scan."""
+    _ensure_no_classify_running()
+    all_files = load_descriptive_files_from_latest_report()
+    return _start_rename_worker(all_files, mode="all")
+
+
+@app.get("/api/rename/status")
+def rename_status():
+    return _rename_state.snapshot()
+
+
+@app.get("/api/rename/results")
+def rename_results():
+    """Devolve todos os resultados acumulados (amostra ou lote completo)."""
+    with _rename_state.lock:
+        results = list(_rename_state.results)
+    summary = {"pendente": 0, "aprovada": 0, "recusada": 0}
+    for r in results:
+        summary[r.get("status", "pendente")] = summary.get(r.get("status", "pendente"), 0) + 1
+    return {
+        "results": results,
+        "summary": summary,
+        "total": len(results),
+    }
+
+
+class RenameUpdate(BaseModel):
+    full_path: str
+    nome_sugerido: str | None = None
+
+
+@app.post("/api/rename/approve")
+def rename_approve(req: RenameUpdate):
+    return _update_rename_status(req.full_path, "aprovada")
+
+
+@app.post("/api/rename/reject")
+def rename_reject(req: RenameUpdate):
+    return _update_rename_status(req.full_path, "recusada")
+
+
+@app.post("/api/rename/edit")
+def rename_edit(req: RenameUpdate):
+    """Edita manualmente o nome sugerido. Valida contra regras OneDrive."""
+    new_name = (req.nome_sugerido or "").strip()
+    if not new_name:
+        raise HTTPException(400, detail="nome_sugerido vazio.")
+
+    # Valida contra regras OneDrive — usa o caminho pai pra montar o caminho final
+    parent_dir = os.path.dirname(req.full_path)
+    candidate_path = os.path.join(parent_dir, new_name)
+    check = onedrive_analyze(new_name, candidate_path)
+    violations = check.get("violacoes_detectadas") or []
+    if violations:
+        raise HTTPException(
+            400,
+            detail=f"Nome editado viola regras OneDrive: {', '.join(violations)}. {check.get('motivo', '')}",
+        )
+
+    with _rename_state.lock:
+        for r in _rename_state.results:
+            if r.get("full_path") == req.full_path:
+                r["nome_sugerido"] = new_name
+                r["edited"] = True
+                return {"status": "ok", "result": r}
+    raise HTTPException(404, detail="Arquivo não encontrado nos resultados.")
+
+
+def _update_rename_status(full_path: str, new_status: str) -> dict:
+    with _rename_state.lock:
+        for r in _rename_state.results:
+            if r.get("full_path") == full_path:
+                r["status"] = new_status
+                return {"status": "ok", "result": r}
+    raise HTTPException(404, detail="Arquivo não encontrado nos resultados.")
+
+
+@app.post("/api/rename/apply")
+def rename_apply():
+    """Aplica as renomeações APROVADAS no disco e cria manifest de rollback."""
+    with _rename_state.lock:
+        approved = [r for r in _rename_state.results if r.get("status") == "aprovada"]
+
+    if not approved:
+        raise HTTPException(400, detail="Nenhuma sugestão aprovada para aplicar.")
+
+    os.makedirs(config.REMEDIATION_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    rollback_path = os.path.join(config.REMEDIATION_DIR, f"rollback_renames_{timestamp}.csv")
+
+    renamed = 0
+    skipped_missing = 0
+    errors: list[str] = []
+    rollback_rows: list[dict] = []
+
+    for r in approved:
+        src = Path(r.get("full_path", ""))
+        new_name = (r.get("nome_sugerido") or "").strip()
+        if not src.exists():
+            skipped_missing += 1
+            continue
+        if not new_name or new_name == src.name:
+            continue
+        dst = src.parent / new_name
+        try:
+            if dst.exists() and dst != src:
+                stem, suffix = Path(new_name).stem, Path(new_name).suffix
+                i = 1
+                while (src.parent / f"{stem} ({i}){suffix}").exists():
+                    i += 1
+                dst = src.parent / f"{stem} ({i}){suffix}"
+            os.rename(str(src), str(dst))
+            renamed += 1
+            rollback_rows.append({
+                "original_path": str(src),
+                "new_path": str(dst),
+                "original_name": src.name,
+                "new_name": dst.name,
+            })
+        except Exception as e:
+            errors.append(f"{src.name}: {type(e).__name__}")
+
+    # Manifest de rollback em CSV (simétrico ao media_offload_manifest)
+    if rollback_rows:
+        try:
+            with open(rollback_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["original_path", "new_path", "original_name", "new_name"],
+                )
+                writer.writeheader()
+                writer.writerows(rollback_rows)
+        except Exception as e:
+            errors.append(f"rollback manifest: {type(e).__name__}")
+
+    return {
+        "renamed": renamed,
+        "skipped_missing": skipped_missing,
+        "errors_count": len(errors),
+        "errors_sample": errors[:10],
+        "rollback_manifest": rollback_path if rollback_rows else None,
+    }
+
+
 @app.get("/api/reports/latest")
 def get_latest_report():
     if not os.path.exists(config.REPORTS_DIR):

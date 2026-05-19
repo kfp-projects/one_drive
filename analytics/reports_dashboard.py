@@ -29,11 +29,14 @@ class ReportsDashboard:
         self.intelligence["folder_depth"] = FolderDepthAnalysis.analyze(self.records)
         self.intelligence["duplicate_analysis"] = DuplicateAnalysis.analyze(self.records)
         self.intelligence["naming_patterns"] = NamingPatterns.analyze(self.records)
-        
+
         # Novas métricas em PT-BR
         self.intelligence["distribuicao_estrutural"] = self._analyze_structural_distribution()
         self.intelligence["categorias_de_arquivos"] = self._analyze_file_categories()
-        
+        self.intelligence["nomes_descritivos_longos"] = sum(
+            1 for r in self.records if r.get("nome_descritivo_longo")
+        )
+
         return self.intelligence
 
     def _analyze_file_categories(self) -> Dict[str, Any]:

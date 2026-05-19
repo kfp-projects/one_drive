@@ -1690,24 +1690,35 @@ function renderRenameList() {
 }
 
 function renderRenameCard(r) {
-    const folder = (r.full_path || '').replace(/[\\/][^\\/]+$/, '');
+    const fullPath = r.full_path || '';
+    const folder = fullPath.replace(/[\\/][^\\/]+$/, '');
+    const folderShort = shortenPath(folder, 70);
     const conf = (r.confianca || 'Media').toLowerCase();
     const isApproved = r.status === 'aprovada';
     const isRejected = r.status === 'recusada';
     const chips = (r.informacao_preservada || []).slice(0, 6).map(c =>
         `<span class="rename-chip">${escapeHtml(c)}</span>`
     ).join('');
-    const editedBadge = r.edited ? '<span class="rename-badge edited">Editado</span>' : '';
-    const errBadge = r.error ? '<span class="rename-badge confianca-baixa">Erro IA</span>' : '';
-    const fullPathAttr = escapeHtml(r.full_path || '');
+    const editedBadge = r.edited ? '<span class="rename-badge edited"><i class="ph ph-pencil"></i> Editado</span>' : '';
+    const errBadge = r.error ? '<span class="rename-badge error"><i class="ph ph-warning"></i> Erro IA</span>' : '';
+    const fullPathAttr = escapeHtml(fullPath);
+
     return `
         <div class="rename-card status-${r.status}" data-path="${fullPathAttr}">
-            <div>
-                <div class="rename-card-folder" title="${escapeHtml(folder)}">${escapeHtml(folder)}</div>
+            <div class="rename-card-body">
+                <div class="rename-card-folder" title="${escapeHtml(folder)}">
+                    <i class="ph ph-folder-notch"></i>
+                    <span>${escapeHtml(folderShort)}</span>
+                </div>
                 <div class="rename-card-names">
-                    <span class="rename-original">${escapeHtml(r.original_name || r.nome_original || '')}</span>
-                    <span class="rename-arrow">→</span>
-                    <span class="rename-suggested" data-role="suggested">${escapeHtml(r.nome_sugerido || '')}</span>
+                    <div class="rename-name-row">
+                        <span class="rename-name-label">Antes</span>
+                        <span class="rename-original">${escapeHtml(r.original_name || r.nome_original || '')}</span>
+                    </div>
+                    <div class="rename-name-row">
+                        <span class="rename-name-label">Depois</span>
+                        <span class="rename-suggested" data-role="suggested" title="Clique em Editar pra alterar">${escapeHtml(r.nome_sugerido || '')}</span>
+                    </div>
                 </div>
                 <div class="rename-meta">
                     <span class="rename-badge confianca-${conf}">${escapeHtml(r.confianca || 'Media')}</span>
@@ -1718,17 +1729,27 @@ function renderRenameCard(r) {
                 ${r.motivo ? `<div class="rename-motivo">${escapeHtml(r.motivo)}</div>` : ''}
             </div>
             <div class="rename-actions">
-                <button class="btn-approve ${isApproved ? 'active' : ''}" data-action="approve">
+                <button class="btn-approve ${isApproved ? 'active' : ''}" data-action="approve" title="Aprovar">
                     <i class="ph ph-check"></i> Aprovar
                 </button>
-                <button class="btn-reject ${isRejected ? 'active' : ''}" data-action="reject">
+                <button class="btn-reject ${isRejected ? 'active' : ''}" data-action="reject" title="Recusar">
                     <i class="ph ph-x"></i> Recusar
                 </button>
-                <button class="btn-edit" data-action="edit">
+                <button class="btn-edit" data-action="edit" title="Editar nome sugerido">
                     <i class="ph ph-pencil"></i> Editar
                 </button>
             </div>
         </div>`;
+}
+
+function shortenPath(p, max = 70) {
+    if (!p || p.length <= max) return p;
+    const sep = p.includes('\\') ? '\\' : '/';
+    const parts = p.split(sep);
+    if (parts.length <= 3) return p;
+    const head = parts.slice(0, 2).join(sep);
+    const tail = parts.slice(-2).join(sep);
+    return `${head}${sep}…${sep}${tail}`;
 }
 
 async function onRenameListClick(e) {

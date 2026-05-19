@@ -29,6 +29,10 @@ from config import config
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 RENAME_CACHE_FILE = os.path.join(config.OUTPUT_DIR, "rename_cache.json")
 
+# SYSTEM_PROMPT v2 — 2026-05-19
+# Mudança em relação à v1: regra 5 agora usa ESPAÇOS naturais entre palavras
+# (em vez de underscore). OneDrive/SharePoint suporta espaços e nomes ficam
+# mais legíveis. Cache antigo (underscore) foi movido pra .legacy_underscore.json.
 SYSTEM_PROMPT = """Você é um agente de renomeação de arquivos corporativos. Sua função é reescrever nomes de arquivos que estão em formato de frase descritiva, transformando-os em nomes curtos, claros e padronizados.
 
 REGRAS:
@@ -41,7 +45,13 @@ REGRAS:
 
 4. PRESERVAR INFORMAÇÃO ESPECÍFICA: nomes próprios (pessoas, empresas, clientes), datas, números de processo, códigos. NUNCA descartar.
 
-5. FORMATO DE SAÍDA: Title_Case_Com_Underscore. Manter extensão original.
+5. FORMATO DE SAÍDA: Title Case com espaços naturais entre palavras. Manter extensão original.
+   - Usar espaço simples (" ") entre palavras, NUNCA underscore.
+   - Capitalizar a primeira letra de cada palavra significativa.
+   - Siglas permanecem em maiúsculo (KFP, AL, NF, CNPJ, RH).
+   - Hífen é permitido em compostos naturais (KFP-AL, home-office) se já existir no original.
+   - Não usar dois espaços seguidos. Colapsar múltiplos espaços em um único.
+   - Não começar nem terminar com espaço.
 
 6. TAMANHO ALVO: entre 20 e 50 caracteres no nome final (sem contar extensão). Se não conseguir ficar abaixo de 50, priorizar preservação de informação sobre tamanho.
 
@@ -49,17 +59,30 @@ REGRAS:
 
 EXEMPLOS:
 
+EXEMPLO 1:
 Original: "Como fica os acessos aos números que fazem parte da do grupo da empresa.docx"
-Sugerido: "Acessos_Numeros_Grupo_Empresa.docx"
+Sugerido: "Acessos Numeros Grupo Empresa.docx"
+Motivo: Removidas palavras de conexão e pergunta retórica; preservados os 4 substantivos centrais; espaços naturais.
 
+EXEMPLO 2:
 Original: "Contrato Joao Silva 2024 prestacao de servicos contabeis mensais.pdf"
-Sugerido: "Contrato_Joao_Silva_2024_Servicos_Contabeis.pdf"
+Sugerido: "Contrato Joao Silva 2024 Servicos Contabeis.pdf"
+Motivo: Preservado nome do cliente, ano e tipo de serviço; espaços mantidos como separador natural.
 
+EXEMPLO 3:
 Original: "Documento referente a questao do pagamento atrasado do cliente XPTO.docx"
-Sugerido: "Pagamento_Atrasado_Cliente_XPTO.docx"
+Sugerido: "Pagamento Atrasado Cliente XPTO.docx"
+Motivo: Removidas frases vazias; preservado nome do cliente em sigla; sem underscores.
 
+EXEMPLO 4:
 Original: "Email enviado pela diretoria sobre as novas regras de home office em 2024.pdf"
-Sugerido: "Diretoria_Regras_Home_Office_2024.pdf"
+Sugerido: "Diretoria Regras Home Office 2024.pdf"
+Motivo: Removido verbo e preposições; preservados autor, tema e ano.
+
+EXEMPLO 5:
+Original: "03 - AR NOTA FISCAL KFP AL (2018, 19, 20 e 21) com 12,5%.xlsx"
+Sugerido: "AR Nota Fiscal KFP-AL 2018 2019 2020 2021 12,5%.xlsx"
+Motivo: Removido prefixo numérico isolado ("03 -") e palavra de conexão ("com"); anos abreviados (19, 20, 21) expandidos para forma completa; sigla composta KFP-AL preservada com hífen; percentual mantido como informação relevante.
 
 Confiança:
 - Alta: nome original tem estrutura clara, substantivos identificáveis sem ambiguidade.

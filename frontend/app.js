@@ -1,13 +1,14 @@
 const API_BASE = (location.protocol === 'http:' || location.protocol === 'https:') ? '' : 'http://127.0.0.1:8000';
 
 const VIEW_META = {
-    dashboard:  { title: 'Visão Geral do Sistema', subtitle: 'Organize, higienize e garanta a conformidade dos arquivos corporativos.' },
-    arquivos:   { title: 'Arquivos Escaneados',    subtitle: 'Lista detalhada dos arquivos com problemas detectados na última varredura.' },
-    remediacao: { title: 'Remediação',              subtitle: 'Aplique correções e mova arquivos de mídia para destinos apropriados.' }
+    dashboard:    { title: 'Visão Geral do Sistema', subtitle: 'Organize, higienize e garanta a conformidade dos arquivos corporativos.' },
+    arquivos:     { title: 'Arquivos Escaneados',    subtitle: 'Lista detalhada dos arquivos com problemas detectados na última varredura.' },
+    remediacao:   { title: 'Remediação',             subtitle: 'Aplique correções e mova arquivos de mídia para destinos apropriados.' },
+    renomeacoes:  { title: 'Renomeações IA',         subtitle: 'Revise e aprove sugestões de renome geradas para nomes descritivos longos.' }
 };
 
 let latestReport = null;
-let lastScannedPath = '';
+let lastScannedPath = localStorage.getItem('organiza_last_scan_path') || '';
 let mediaFiles = [];
 let activeMediaCategory = null;
 let latestReportGroups = new Map();
@@ -142,6 +143,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupFilesView();
     setupMediaList();
     setupGlobalCellDelegation();
+    setupRenameView();
     autoReattachClassification();
 });
 
@@ -343,11 +345,18 @@ function switchView(view) {
     if (view === 'arquivos' || (view === 'remediacao' && !latestReport)) {
         loadLatestReport();
     }
+    if (view === 'renomeacoes') {
+        refreshRenameSourceInfo();
+        loadRenameResults();
+    }
 }
 
 function setupScanner() {
     const btnScan = document.getElementById('btn-scan');
     const inputPath = document.getElementById('target-path');
+    if (inputPath && lastScannedPath && !inputPath.value) {
+        inputPath.value = lastScannedPath;
+    }
     const statusMsg = document.getElementById('scan-status');
     const statusText = document.getElementById('scan-status-text');
     const statsDashboard = document.getElementById('stats-dashboard');
@@ -374,11 +383,13 @@ function setupScanner() {
 
             if (response.ok) {
                 lastScannedPath = path;
+                try { localStorage.setItem('organiza_last_scan_path', path); } catch {}
                 const stats = result.data.stats;
                 document.getElementById('stat-total-files').innerText = stats.total_files || 0;
                 document.getElementById('stat-long-paths').innerText = stats.long_paths || 0;
                 document.getElementById('stat-deep-folders').innerText = stats.excessive_depth || 0;
                 document.getElementById('stat-forbidden').innerText = stats.forbidden_chars || 0;
+                document.getElementById('stat-descriptive-names').innerText = stats.nomes_descritivos_longos || 0;
 
                 const mediaCount = result.data.media_move_plan_count || 0;
                 const statMedia = document.getElementById('stat-media');
@@ -1503,4 +1514,390 @@ function escapeHtml(str) {
     return String(str)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+// ============================================================================
+// Renomeações IA — Revisão de Sugestões
+// ============================================================================
+
+let renameResults = [];
+let renamePollTimer = null;
+
+function setupRenameView() {
+    const btnSample = document.getElementById('btn-rename-sample');
+    const btnAll = document.getElementById('btn-rename-all');
+    const btnApply = document.getElementById('btn-rename-apply');
+    const btnApproveAlta = document.getElementById('btn-rename-bulk-approve-alta');
+    const btnRejectBaixa = document.getElementById('btn-rename-bulk-reject-baixa');
+    const btnExport = document.getElementById('btn-rename-export');
+    const search = document.getElementById('rename-filter-search');
+    const fConf = document.getElementById('rename-filter-confidence');
+    const fStatus = document.getElementById('rename-filter-status');
+
+    if (!btnSample) return;
+
+    btnSample.addEventListener('click', () => startRenameSuggestions('sample'));
+    btnAll.addEventListener('click', () => startRenameSuggestions('all'));
+    btnApply.addEventListener('click', applyApprovedRenames);
+    btnApproveAlta.addEventListener('click', () => bulkUpdate('Alta', 'aprovada'));
+    btnRejectBaixa.addEventListener('click', () => bulkUpdate('Baixa', 'recusada'));
+    btnExport.addEventListener('click', exportRenameCsv);
+    search.addEventListener('input', debounce(renderRenameList, 150));
+    fConf.addEventListener('change', renderRenameList);
+    fStatus.addEventListener('change', renderRenameList);
+
+    // Event delegation pra cards (approve/reject/edit)
+    document.getElementById('rename-list').addEventListener('click', onRenameListClick);
+}
+
+function refreshRenameSourceInfo() {
+    const info = document.getElementById('rename-source-info');
+    const btnSample = document.getElementById('btn-rename-sample');
+    const btnAll = document.getElementById('btn-rename-all');
+    const total = parseInt(document.getElementById('stat-descriptive-names')?.innerText || '0', 10) || 0;
+    if (total > 0) {
+        info.innerText = `Foram detectados ${total.toLocaleString('pt-BR')} arquivos com nomes descritivos longos no último scan.`;
+        btnSample.disabled = false;
+        btnAll.disabled = false;
+    } else {
+        info.innerText = 'Aguardando scan… Rode uma varredura no Dashboard primeiro.';
+        btnSample.disabled = true;
+        btnAll.disabled = true;
+    }
+}
+
+async function startRenameSuggestions(mode) {
+    const label = mode === 'sample' ? 'amostra de 50' : 'TODOS os arquivos';
+    const ok = await showCustomConfirm(
+        `Gerar Sugestões (${mode})`,
+        `Iniciar geração de sugestões para ${label}?\n\nModelo: Gemini 2.5 Flash-Lite (sem thinking)\nTemperature: 0.1\n\nAs sugestões serão revisadas manualmente — nenhum arquivo é renomeado automaticamente.`,
+        'Gerar',
+        'Cancelar'
+    );
+    if (!ok) return;
+
+    try {
+        const url = mode === 'sample'
+            ? `${API_BASE}/api/rename/suggest-sample`
+            : `${API_BASE}/api/rename/suggest-all`;
+        const res = await fetch(url, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+            await showCustomAlert('Erro', `Erro: ${data.detail || 'desconhecido'}`);
+            return;
+        }
+        document.getElementById('rename-loading').classList.remove('hidden');
+        document.getElementById('rename-loading-text').innerText =
+            `Gerando sugestões (${data.total} arquivos)…`;
+        document.getElementById('rename-empty').classList.add('hidden');
+        startRenamePolling();
+    } catch (e) {
+        await showCustomAlert('Erro de Conexão', `Erro: ${e.message}`);
+    }
+}
+
+function startRenamePolling() {
+    if (renamePollTimer) return;
+    renamePollTimer = setInterval(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/rename/status`);
+            const status = await res.json();
+            document.getElementById('rename-loading-text').innerText =
+                `Gerando sugestões — ${status.done}/${status.total} (${Math.round(status.percent)}%) · API: ${status.api_calls} · Cache: ${status.cache_hits}`;
+            if (!status.running) {
+                clearInterval(renamePollTimer);
+                renamePollTimer = null;
+                document.getElementById('rename-loading').classList.add('hidden');
+                if (status.error) {
+                    await showCustomAlert('Erro', `Falha na geração: ${status.error}`);
+                }
+                loadRenameResults();
+            }
+        } catch {
+            // backend offline transiente; mantém o timer
+        }
+    }, 1500);
+}
+
+async function loadRenameResults() {
+    try {
+        const res = await fetch(`${API_BASE}/api/rename/results`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renameResults = data.results || [];
+        renderRenameList();
+
+        // Se tem rodando, retoma polling
+        const sres = await fetch(`${API_BASE}/api/rename/status`);
+        const status = await sres.json();
+        if (status.running) {
+            document.getElementById('rename-loading').classList.remove('hidden');
+            startRenamePolling();
+        }
+    } catch (e) {
+        console.error('loadRenameResults:', e);
+    }
+}
+
+function renderRenameList() {
+    const listEl = document.getElementById('rename-list');
+    const emptyEl = document.getElementById('rename-empty');
+    const summaryEl = document.getElementById('rename-summary');
+    const filterEl = document.getElementById('rename-filter-bar');
+
+    if (!renameResults || renameResults.length === 0) {
+        listEl.innerHTML = '';
+        emptyEl.classList.remove('hidden');
+        summaryEl.style.display = 'none';
+        filterEl.style.display = 'none';
+        return;
+    }
+
+    emptyEl.classList.add('hidden');
+    summaryEl.style.display = 'grid';
+    filterEl.style.display = 'flex';
+
+    // Resumo
+    const totals = { pendente: 0, aprovada: 0, recusada: 0 };
+    let cacheHits = 0, apiCalls = 0;
+    for (const r of renameResults) {
+        totals[r.status] = (totals[r.status] || 0) + 1;
+        if (r.from_cache) cacheHits++; else apiCalls++;
+    }
+    document.getElementById('rename-total').innerText = renameResults.length;
+    document.getElementById('rename-pending').innerText = totals.pendente;
+    document.getElementById('rename-approved').innerText = totals.aprovada;
+    document.getElementById('rename-rejected').innerText = totals.recusada;
+    document.getElementById('rename-cost').innerText = `${apiCalls} / ${cacheHits}`;
+    document.getElementById('btn-rename-apply').disabled = totals.aprovada === 0;
+
+    // Filtros
+    const q = (document.getElementById('rename-filter-search').value || '').toLowerCase().trim();
+    const fConf = document.getElementById('rename-filter-confidence').value;
+    const fStatus = document.getElementById('rename-filter-status').value;
+    const filtered = renameResults.filter(r => {
+        if (q && !(r.original_name || '').toLowerCase().includes(q)) return false;
+        if (fConf && r.confianca !== fConf) return false;
+        if (fStatus && r.status !== fStatus) return false;
+        return true;
+    });
+
+    // Renderiza só os primeiros 500 pra não travar
+    const CAP = 500;
+    const visible = filtered.slice(0, CAP);
+    listEl.innerHTML = visible.map(renderRenameCard).join('') +
+        (filtered.length > CAP ? `<div class="empty-state" style="padding:12px;">…mais ${filtered.length - CAP} ocultos pelo limite de renderização. Use os filtros pra restringir.</div>` : '');
+}
+
+function renderRenameCard(r) {
+    const fullPath = r.full_path || '';
+    const folder = fullPath.replace(/[\\/][^\\/]+$/, '');
+    const folderShort = shortenPath(folder, 70);
+    const conf = (r.confianca || 'Media').toLowerCase();
+    const isApproved = r.status === 'aprovada';
+    const isRejected = r.status === 'recusada';
+    const chips = (r.informacao_preservada || []).slice(0, 6).map(c =>
+        `<span class="rename-chip">${escapeHtml(c)}</span>`
+    ).join('');
+    const editedBadge = r.edited ? '<span class="rename-badge edited"><i class="ph ph-pencil"></i> Editado</span>' : '';
+    const errBadge = r.error ? '<span class="rename-badge error"><i class="ph ph-warning"></i> Erro IA</span>' : '';
+    const fullPathAttr = escapeHtml(fullPath);
+
+    return `
+        <div class="rename-card status-${r.status}" data-path="${fullPathAttr}">
+            <div class="rename-card-body">
+                <div class="rename-card-folder" title="${escapeHtml(folder)}">
+                    <i class="ph ph-folder-notch"></i>
+                    <span>${escapeHtml(folderShort)}</span>
+                </div>
+                <div class="rename-card-names">
+                    <div class="rename-name-row">
+                        <span class="rename-name-label">Antes</span>
+                        <span class="rename-original">${escapeHtml(r.original_name || r.nome_original || '')}</span>
+                    </div>
+                    <div class="rename-name-row">
+                        <span class="rename-name-label">Depois</span>
+                        <span class="rename-suggested" data-role="suggested" title="Clique em Editar pra alterar">${escapeHtml(r.nome_sugerido || '')}</span>
+                    </div>
+                </div>
+                <div class="rename-meta">
+                    <span class="rename-badge confianca-${conf}">${escapeHtml(r.confianca || 'Media')}</span>
+                    ${editedBadge}
+                    ${errBadge}
+                    ${chips}
+                </div>
+                ${r.motivo ? `<div class="rename-motivo">${escapeHtml(r.motivo)}</div>` : ''}
+            </div>
+            <div class="rename-actions">
+                <button class="btn-approve ${isApproved ? 'active' : ''}" data-action="approve" title="Aprovar">
+                    <i class="ph ph-check"></i> Aprovar
+                </button>
+                <button class="btn-reject ${isRejected ? 'active' : ''}" data-action="reject" title="Recusar">
+                    <i class="ph ph-x"></i> Recusar
+                </button>
+                <button class="btn-edit" data-action="edit" title="Editar nome sugerido">
+                    <i class="ph ph-pencil"></i> Editar
+                </button>
+            </div>
+        </div>`;
+}
+
+function shortenPath(p, max = 70) {
+    if (!p || p.length <= max) return p;
+    const sep = p.includes('\\') ? '\\' : '/';
+    const parts = p.split(sep);
+    if (parts.length <= 3) return p;
+    const head = parts.slice(0, 2).join(sep);
+    const tail = parts.slice(-2).join(sep);
+    return `${head}${sep}…${sep}${tail}`;
+}
+
+async function onRenameListClick(e) {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const card = btn.closest('.rename-card');
+    if (!card) return;
+    const path = card.dataset.path;
+    const action = btn.dataset.action;
+    const record = renameResults.find(r => r.full_path === path);
+    if (!record) return;
+
+    if (action === 'approve') {
+        await callRenameUpdate('/api/rename/approve', { full_path: path });
+        record.status = 'aprovada';
+        renderRenameList();
+    } else if (action === 'reject') {
+        await callRenameUpdate('/api/rename/reject', { full_path: path });
+        record.status = 'recusada';
+        renderRenameList();
+    } else if (action === 'edit') {
+        const suggEl = card.querySelector('[data-role="suggested"]');
+        if (!suggEl) return;
+        if (suggEl.getAttribute('contenteditable') === 'true') {
+            // Salva
+            const newName = suggEl.innerText.trim();
+            if (!newName) {
+                await showCustomAlert('Erro', 'Nome não pode ficar vazio.');
+                return;
+            }
+            try {
+                const res = await fetch(`${API_BASE}/api/rename/edit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ full_path: path, nome_sugerido: newName }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    await showCustomAlert('Validação OneDrive', data.detail || 'Erro desconhecido.');
+                    return;
+                }
+                record.nome_sugerido = newName;
+                record.edited = true;
+                suggEl.removeAttribute('contenteditable');
+                renderRenameList();
+            } catch (err) {
+                await showCustomAlert('Erro', err.message);
+            }
+        } else {
+            suggEl.setAttribute('contenteditable', 'true');
+            suggEl.focus();
+            // Seleciona conteúdo
+            const range = document.createRange();
+            range.selectNodeContents(suggEl);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+    }
+}
+
+async function callRenameUpdate(endpoint, body) {
+    try {
+        await fetch(`${API_BASE}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    } catch (e) {
+        console.error('callRenameUpdate:', e);
+    }
+}
+
+async function bulkUpdate(confianca, newStatus) {
+    const targets = renameResults.filter(r => r.confianca === confianca && r.status === 'pendente');
+    if (targets.length === 0) {
+        await showCustomAlert('Aviso', `Nenhuma sugestão pendente com confiança ${confianca}.`);
+        return;
+    }
+    const verb = newStatus === 'aprovada' ? 'aprovar' : 'recusar';
+    const ok = await showCustomConfirm(
+        `Ação em lote`,
+        `${verb.charAt(0).toUpperCase() + verb.slice(1)} ${targets.length} sugestão(ões) de confiança ${confianca}?`,
+        'Confirmar',
+        'Cancelar'
+    );
+    if (!ok) return;
+
+    const endpoint = newStatus === 'aprovada' ? '/api/rename/approve' : '/api/rename/reject';
+    await Promise.all(targets.map(t =>
+        callRenameUpdate(endpoint, { full_path: t.full_path })
+    ));
+    for (const t of targets) t.status = newStatus;
+    renderRenameList();
+}
+
+async function applyApprovedRenames() {
+    const approved = renameResults.filter(r => r.status === 'aprovada').length;
+    if (approved === 0) return;
+    const ok = await showCustomConfirm(
+        'Aplicar Renomeações',
+        `Você está prestes a renomear ${approved} arquivo(s). Esta ação pode ser desfeita via o manifesto de rollback em outputs/remediation/. Continuar?`,
+        'Aplicar',
+        'Cancelar'
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('btn-rename-apply');
+    const original = btn.innerHTML;
+    btn.innerHTML = '<i class="ph ph-spinner"></i> Aplicando…';
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/rename/apply`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+            await showCustomAlert('Erro', data.detail || 'Erro desconhecido.');
+            return;
+        }
+        let msg = `Renomeados: ${data.renamed}\n`;
+        if (data.skipped_missing) msg += `Ignorados (não existem mais): ${data.skipped_missing}\n`;
+        if (data.errors_count) msg += `Erros: ${data.errors_count}\n`;
+        if (data.rollback_manifest) msg += `\nRollback salvo em: ${data.rollback_manifest}`;
+        await showCustomAlert('Aplicação Concluída', msg);
+        loadRenameResults();
+    } catch (e) {
+        await showCustomAlert('Erro', e.message);
+    } finally {
+        btn.innerHTML = original;
+        btn.disabled = false;
+    }
+}
+
+function exportRenameCsv() {
+    if (!renameResults.length) return;
+    const headers = ['status', 'confianca', 'edited', 'original_name', 'nome_sugerido', 'full_path', 'motivo'];
+    const rows = renameResults.map(r => headers.map(h => {
+        let v = r[h];
+        if (v == null) v = '';
+        v = String(v).replace(/"/g, '""');
+        return /[",\n]/.test(v) ? `"${v}"` : v;
+    }).join(','));
+    const csv = headers.join(',') + '\n' + rows.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `renomeacoes_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
 }

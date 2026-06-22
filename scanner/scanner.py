@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 from config import config
 from utils.logger import setup_logger
 from scanner.pipeline import PipelineSim
+from scanner.descriptive_name_detector import eh_nome_descritivo_longo
 
 logger = setup_logger("scanner")
 
@@ -27,7 +28,8 @@ class ScannerService:
             "long_paths": 0,
             "forbidden_chars": 0,
             "duplicates": 0,
-            "excessive_depth": 0
+            "excessive_depth": 0,
+            "nomes_descritivos_longos": 0,
         }
 
         self.forbidden_chars = self.pipeline.forbidden_chars
@@ -140,6 +142,13 @@ class ScannerService:
             suggested_name = name
             action_required = "BLOCKED"
 
+        # --- Detecção informativa: nome descritivo longo (só arquivos) -------
+        # Fase APENAS de contagem — não influencia violação OneDrive nem
+        # gera sugestão de renomeação. Aplica-se só a arquivos.
+        nome_descritivo_longo = (not is_dir) and eh_nome_descritivo_longo(name)
+        if nome_descritivo_longo:
+            self.stats["nomes_descritivos_longos"] += 1
+
         self.records.append({
             "original_name": name,
             "full_path": path_str,
@@ -147,6 +156,7 @@ class ScannerService:
             "extension": path.suffix if not is_dir else "DIR",
             "is_dir": is_dir,
             "is_shared": is_shared,
+            "nome_descritivo_longo": nome_descritivo_longo,
             "detected_problems": "; ".join(violation_codes),
             "suggested_name": suggested_name,
             "risk_level": risk_level,
@@ -169,7 +179,7 @@ class ScannerService:
         
         fieldnames = [
             "original_name", "full_path", "path_length", "extension",
-            "is_dir", "is_shared",
+            "is_dir", "is_shared", "nome_descritivo_longo",
             "detected_problems", "suggested_name", "risk_level",
             "classification", "structural_score",
             "semantic_summary", "confidence_score", "naming_reason", "context_analysis"
@@ -177,10 +187,13 @@ class ScannerService:
         
         # Inclui itens compartilhados (frozen) mesmo sem violação, para que
         # apareçam na listagem com o badge "Bloqueado" e o usuário saiba que
-        # existem mas não podem ser alterados.
+        # existem mas não podem ser alterados. Também inclui registros que só
+        # têm "nome descritivo longo" (informativo, fase de detecção).
         filtered_records = [
             r for r in self.records
-            if r["risk_level"] != "NONE" or r.get("is_shared")
+            if r["risk_level"] != "NONE"
+            or r.get("is_shared")
+            or r.get("nome_descritivo_longo")
         ]
 
         # CSV Export

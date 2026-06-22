@@ -15,6 +15,12 @@ class Config:
     # Informativo apenas — não viola OneDrive, mas é métrica útil para o analytics
     MAX_DEPTH: int = 10
 
+    # Detecção de "nomes descritivos longos" (frases usadas como nome).
+    # Fase de DETECÇÃO apenas — não gera sugestão de renomeação.
+    LIMITE_CARACTERES_NOME_DESCRITIVO: int = 50
+    LIMITE_PALAVRAS_NOME_DESCRITIVO: int = 6
+    SEPARADORES_PALAVRAS: list = (" ", "_", "-")
+
     # Rules
     IGNORED_EXTENSIONS: Set[str] = {'.tmp', '.log', '.ini', '.db'}
     # Pastas que o scanner pula completamente — não entra, não conta.

@@ -1277,3 +1277,278 @@ button:disabled {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* =========================================================================
+   Renomeações IA — Revisão de Sugestões
+   ========================================================================= */
+
+/* Painel de geração (botões amostra/todas) */
+#view-renomeacoes .action-panel {
+    margin-top: 20px;
+}
+
+/* Resumo (cards no topo) */
+.rename-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px;
+    margin: 24px 0 18px;
+}
+.rename-summary-card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.rename-summary-card:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+.rename-summary-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    font-weight: 600;
+}
+.rename-summary-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-main);
+    line-height: 1.2;
+}
+.rename-summary-card.rename-pending  { border-left: 4px solid #9ca3af; }
+.rename-summary-card.rename-approved { border-left: 4px solid var(--color-success); }
+.rename-summary-card.rename-approved .rename-summary-value { color: #065f46; }
+.rename-summary-card.rename-rejected { border-left: 4px solid var(--color-danger); }
+.rename-summary-card.rename-rejected .rename-summary-value { color: #991b1b; }
+.rename-summary-card.rename-cost {
+    border-left: 4px solid var(--primary-color);
+}
+.rename-summary-card.rename-cost .rename-summary-value { font-size: 18px; }
+
+/* Filter bar específica da view (sobrescreve apertado da global) */
+#view-renomeacoes .filter-bar {
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 14px;
+    background: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    margin-bottom: 18px;
+}
+#view-renomeacoes .filter-bar input[type="text"],
+#view-renomeacoes .filter-bar select {
+    flex: 1 1 180px;
+    min-width: 160px;
+}
+#view-renomeacoes .filter-bar .btn-small {
+    white-space: nowrap;
+}
+#view-renomeacoes .filter-bar .btn-small i {
+    margin-right: 4px;
+}
+
+/* Lista de sugestões */
+.rename-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.rename-card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-left: 4px solid #d1d5db;
+    border-radius: var(--radius-md);
+    padding: 16px 18px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    align-items: stretch;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    box-shadow: var(--shadow-sm);
+}
+.rename-card:hover { box-shadow: var(--shadow-md); }
+.rename-card.status-aprovada {
+    border-left-color: var(--color-success);
+    background: linear-gradient(to right, #f0fdf4 0%, #ffffff 30%);
+}
+.rename-card.status-recusada {
+    border-left-color: var(--color-danger);
+    background: linear-gradient(to right, #fef2f2 0%, #ffffff 30%);
+    opacity: 0.78;
+}
+.rename-card.status-pendente { border-left-color: #9ca3af; }
+
+.rename-card-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.rename-card-folder {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.rename-card-folder i {
+    flex-shrink: 0;
+    color: #9ca3af;
+}
+
+.rename-card-names {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    font-size: 13px;
+}
+.rename-name-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+.rename-name-label {
+    flex-shrink: 0;
+    width: 70px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding-top: 3px;
+    font-weight: 600;
+}
+.rename-original {
+    color: #6b7280;
+    text-decoration: line-through;
+    text-decoration-color: #fca5a5;
+    text-decoration-thickness: 1.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+.rename-suggested {
+    color: #065f46;
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: #ecfdf5;
+    border: 1px solid #d1fae5;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    line-height: 1.5;
+}
+.rename-suggested:hover { background: #d1fae5; }
+.rename-suggested[contenteditable="true"] {
+    background: #fef9c3;
+    border-color: var(--color-warning);
+    outline: 2px solid rgba(245, 158, 11, 0.3);
+    cursor: text;
+}
+
+.rename-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-top: 2px;
+}
+.rename-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 11px;
+    line-height: 1;
+}
+.rename-badge.confianca-alta  { background: #d1fae5; color: #065f46; }
+.rename-badge.confianca-media { background: #fef3c7; color: #92400e; }
+.rename-badge.confianca-baixa { background: #fee2e2; color: #991b1b; }
+.rename-badge.edited          { background: #ddd6fe; color: #5b21b6; }
+.rename-badge.error           { background: #fee2e2; color: #991b1b; }
+.rename-chip {
+    background: #eff6ff;
+    color: #1e40af;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    border: 1px solid #dbeafe;
+}
+.rename-motivo {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    font-style: italic;
+    line-height: 1.45;
+}
+
+/* Botões de ação — agora verticais à direita */
+.rename-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-self: center;
+    min-width: 120px;
+}
+.rename-actions button {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: white;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+.rename-actions button:hover { transform: translateY(-1px); }
+.rename-actions .btn-approve         { color: #065f46; border-color: #a7f3d0; background: #f0fdf4; }
+.rename-actions .btn-approve:hover   { background: #d1fae5; }
+.rename-actions .btn-approve.active  { background: var(--color-success); color: white; border-color: var(--color-success); }
+.rename-actions .btn-reject          { color: #991b1b; border-color: #fecaca; background: #fef2f2; }
+.rename-actions .btn-reject:hover    { background: #fee2e2; }
+.rename-actions .btn-reject.active   { background: var(--color-danger); color: white; border-color: var(--color-danger); }
+.rename-actions .btn-edit            { color: var(--primary-color); border-color: #bfdbfe; background: #eff6ff; }
+.rename-actions .btn-edit:hover      { background: #dbeafe; }
+
+/* Responsivo: em telas estreitas, botões viram horizontal full-width */
+@media (max-width: 720px) {
+    .rename-card {
+        grid-template-columns: 1fr;
+    }
+    .rename-actions {
+        flex-direction: row;
+        min-width: 0;
+        width: 100%;
+    }
+    .rename-actions button { flex: 1; }
+    .rename-name-label { width: 60px; font-size: 9px; }
+}
+

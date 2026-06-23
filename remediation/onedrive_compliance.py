@@ -32,6 +32,17 @@ def _load_rules() -> dict:
     return _RULES
 
 
+def _effective_max_path(rules: dict) -> int:
+    """Limite EFETIVO de caminho no disco local.
+
+    O OneDrive mede o caminho na URL da nuvem (SharePoint), ~`cloud_url_overhead`
+    chars mais longa que o prefixo local. Logo, o limite real no caminho local é
+    max_path_length menos esse overhead. Sem isso, arquivos que estouram no
+    OneDrive passam despercebidos (caminho local fica abaixo de 400).
+    """
+    return rules["max_path_length"] - rules.get("cloud_url_overhead", 0)
+
+
 # ---------------------------------------------------------------------------
 # Detecção
 # ---------------------------------------------------------------------------
@@ -110,8 +121,8 @@ def _detect_violations(name: str, full_path: str) -> List[str]:
     if len(name) > rules["max_filename_length"]:
         violations.append("A")
 
-    # (B) caminho completo > 400
-    if len(full_path) > rules["max_path_length"]:
+    # (B) caminho completo acima do limite EFETIVO (400 menos overhead da nuvem)
+    if len(full_path) > _effective_max_path(rules):
         violations.append("B")
 
     # (C) caractere proibido no nome
@@ -208,7 +219,7 @@ def _fix_path_length(name: str, full_path: str) -> Optional[str]:
     por renomeação é impossível e o spec manda manter o original.
     """
     rules = _load_rules()
-    max_path = rules["max_path_length"] - rules["margem_seguranca_path"]
+    max_path = _effective_max_path(rules) - rules["margem_seguranca_path"]
     if len(full_path) <= max_path:
         return name
     excess = len(full_path) - max_path
@@ -353,7 +364,7 @@ def analyze(name: str, full_path: str) -> dict:
 
     new_full_path = os.path.join(parent_dir, new_name) if parent_dir else new_name
 
-    if "B" in violations or len(new_full_path) > rules["max_path_length"]:
+    if "B" in violations or len(new_full_path) > _effective_max_path(rules):
         before = new_name
         fixed = _fix_path_length(new_name, new_full_path)
         if fixed is None:

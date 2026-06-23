@@ -12,6 +12,27 @@ from scanner.descriptive_name_detector import eh_nome_descritivo_longo
 
 logger = setup_logger("scanner")
 
+
+def _to_long_path(path_str: str) -> str:
+    """No Windows, prefixa \\\\?\\ pra os.walk/stat alcançarem caminhos acima de
+    260 chars. Sem isso o Python pula silenciosamente as pastas mais fundas —
+    justamente as que estouram o limite do OneDrive."""
+    if os.name == "nt":
+        ap = os.path.abspath(path_str)
+        if not ap.startswith("\\\\?\\"):
+            return "\\\\?\\" + ap
+        return ap
+    return path_str
+
+
+def _strip_long_path(path_str: str) -> str:
+    """Remove o prefixo \\\\?\\ pra guardar/exibir o caminho real (o que o
+    OneDrive enxerga) e medir o comprimento verdadeiro."""
+    if path_str.startswith("\\\\?\\"):
+        return path_str[4:]
+    return path_str
+
+
 class ScannerService:
     """
     Core service for scanning directories.
@@ -86,7 +107,10 @@ class ScannerService:
         # pega "Backup de Imagens" / "BACKUP DE IMAGENS" / etc.
         ignored_lower = {x.lower() for x in config.IGNORED_FOLDERS}
 
-        for root, dirs, files in os.walk(self.root_dir):
+        # Caminho longo: percorre via prefixo \\?\ pra alcançar pastas >260 chars.
+        walk_root = _to_long_path(str(self.root_dir))
+
+        for root, dirs, files in os.walk(walk_root):
             root_path = Path(root)
 
             # Remove ignored folders to prevent walking into them (case-insensitive)
@@ -95,7 +119,7 @@ class ScannerService:
             dirs[:] = [
                 d for d in dirs
                 if d.lower() not in ignored_lower
-                and not self._is_excluded(d, str(root_path / d))
+                and not self._is_excluded(d, _strip_long_path(str(root_path / d)))
             ]
 
             for d in dirs:
@@ -122,12 +146,18 @@ class ScannerService:
         Pasta/arquivo em conformidade resulta em sugestão == original e
         action_required == "NONE" — não geramos sugestões cosméticas.
         """
-        path_str = str(path)
+        # path pode vir com prefixo \\?\ (caminho longo). Guardamos/medimos
+        # sempre o caminho LIMPO (o que o OneDrive enxerga); operações de disco
+        # (stat) usam o path original, que já carrega o prefixo quando preciso.
+        path_str = _strip_long_path(str(path))
         name = path.name
         path_length = len(path_str)
 
         # --- Métricas informativas para o analytics (NÃO viram violação) -----
-        depth = len(path.relative_to(self.root_dir).parts)
+        try:
+            depth = len(Path(path_str).relative_to(self.root_dir).parts)
+        except ValueError:
+            depth = path_str.count(os.sep)
         if depth > config.MAX_DEPTH:
             self.stats["excessive_depth"] += 1
 

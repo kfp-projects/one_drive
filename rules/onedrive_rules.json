@@ -2,6 +2,8 @@
   "_doc": "Regras oficiais de conformidade OneDrive/SharePoint (Microsoft Learn, 2025). Fonte única da verdade — qualquer mudança nos limites do OneDrive deve ser feita aqui.",
   "max_filename_length": 255,
   "max_path_length": 400,
+  "_doc_cloud_url_overhead": "O OneDrive mede o caminho na URL da NUVEM (SharePoint), nao no caminho local. O prefixo da nuvem (https://tenant.sharepoint.com/.../Documents/) e ~49 chars mais longo que o prefixo local de sincronizacao (C:\\Users\\<user>\\OneDrive - <tenant>\\). Por isso o limite EFETIVO no caminho local e ~351, nao 400. Ajuste se seu tenant tiver prefixo diferente.",
+  "cloud_url_overhead": 49,
   "margem_seguranca_nome": 5,
   "margem_seguranca_path": 5,
   "min_useful_base_chars": 10,

@@ -1,6 +1,3 @@
-# Remediation Package Init
-from .remediation_engine import RemediationEngine
-from .policy_engine import PolicyEngine
-from .rollback_manager import RollbackManager
-from .batch_planner import BatchPlanner
-from .rename_simulator import RenameSimulator
+# Remediation Package
+# Núcleo ativo: renomeação por IA (rename_suggester) + conformidade OneDrive
+# (onedrive_compliance). Os engines legados foram removidos no rework.

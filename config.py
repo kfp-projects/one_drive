@@ -64,5 +64,8 @@ class Config:
     # Style Policy
     STYLE_GUIDE_PATH: str = os.path.join(RULES_DIR, "corporate_naming_style.json")
     FROZEN_ITEMS_PATH: str = os.path.join(RULES_DIR, "frozen_items.json")
+    # Lista de exclusão TOTAL: pastas (e tudo dentro delas) que ficam de fora
+    # de análise, modificação e todo o processo. Editável pelo usuário.
+    EXCLUSIONS_PATH: str = os.path.join(RULES_DIR, "exclusions.json")
 
 config = Config()

@@ -1,0 +1,14 @@
+{
+  "_doc": "Pastas que ficam TOTALMENTE de fora do processo (analise, deteccao e renome) — inclui tudo que existir dentro delas. Edite as listas abaixo antes de rodar o scan.",
+  "_como_usar": {
+    "excluded_folder_names": "Casa por NOME de pasta (case-insensitive). Pega a pasta em qualquer lugar da arvore. Ex.: 'NAO MEXER' exclui toda pasta chamada 'nao mexer'.",
+    "excluded_folder_paths": "Casa por CAMINHO (prefixo). Exclui a pasta exata e o que esta dentro. Use o caminho absoluto. Barras invertidas devem ser duplicadas no JSON."
+  },
+  "excluded_folder_names": [],
+  "excluded_folder_paths": [
+    "C:\\Users\\kfpno\\OneDrive - Kfp Distribuidora Ltda\\Backup",
+    "C:\\Users\\kfpno\\OneDrive - Kfp Distribuidora Ltda\\Backup APS",
+    "C:\\Users\\kfpno\\OneDrive - Kfp Distribuidora Ltda\\backup de audios",
+    "C:\\Users\\kfpno\\OneDrive - Kfp Distribuidora Ltda\\backup de imagens"
+  ]
+}

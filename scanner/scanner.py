@@ -36,6 +36,7 @@ class ScannerService:
         self._file_hashes: Dict[str, str] = {}
 
         self.frozen_folders, self.frozen_files = self._load_frozen_items()
+        self.excluded_names, self.excluded_paths = self._load_exclusions()
 
     def _load_frozen_items(self):
         try:
@@ -47,6 +48,35 @@ class ScannerService:
         except Exception as e:
             logger.warning(f"Could not load frozen_items.json: {e}")
             return set(), set()
+
+    def _load_exclusions(self):
+        """Pastas totalmente excluídas do processo (nome ou caminho).
+
+        Retorna (set de nomes lower, lista de caminhos prefixo normalizados).
+        """
+        try:
+            with open(config.EXCLUSIONS_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            names = {x.lower() for x in data.get("excluded_folder_names", []) if x}
+            paths = [os.path.normcase(os.path.normpath(x)) for x in data.get("excluded_folder_paths", []) if x]
+            if names or paths:
+                logger.info(f"Exclusões carregadas: {len(names)} nome(s), {len(paths)} caminho(s).")
+            return names, paths
+        except FileNotFoundError:
+            return set(), []
+        except Exception as e:
+            logger.warning(f"Could not load exclusions.json: {e}")
+            return set(), []
+
+    def _is_excluded(self, dir_name: str, full_path: str) -> bool:
+        """True se a pasta deve ser totalmente ignorada (por nome ou caminho)."""
+        if dir_name.lower() in self.excluded_names:
+            return True
+        norm = os.path.normcase(os.path.normpath(full_path))
+        for p in self.excluded_paths:
+            if norm == p or norm.startswith(p + os.sep):
+                return True
+        return False
 
     def scan_directory(self):
         """Recursively scans the directory and records issues."""
@@ -60,7 +90,13 @@ class ScannerService:
             root_path = Path(root)
 
             # Remove ignored folders to prevent walking into them (case-insensitive)
-            dirs[:] = [d for d in dirs if d.lower() not in ignored_lower]
+            # E também as pastas da lista de exclusão do usuário (nome ou caminho)
+            # — assim nem a pasta nem nada dentro dela é analisado/renomeado.
+            dirs[:] = [
+                d for d in dirs
+                if d.lower() not in ignored_lower
+                and not self._is_excluded(d, str(root_path / d))
+            ]
 
             for d in dirs:
                 self.stats["total_folders"] += 1
@@ -142,10 +178,12 @@ class ScannerService:
             suggested_name = name
             action_required = "BLOCKED"
 
-        # --- Detecção informativa: nome descritivo longo (só arquivos) -------
-        # Fase APENAS de contagem — não influencia violação OneDrive nem
-        # gera sugestão de renomeação. Aplica-se só a arquivos.
-        nome_descritivo_longo = (not is_dir) and eh_nome_descritivo_longo(name)
+        # --- Detecção: nome descritivo longo (arquivos E pastas) -------------
+        # Marca candidatos à renomeação por IA. Itens compartilhados (frozen)
+        # são marcados aqui mas filtrados depois (não viram candidatos).
+        # Pastas agora também entram — a renomeação trata a ordem (mais fundo
+        # primeiro) pra não quebrar os caminhos dos filhos.
+        nome_descritivo_longo = eh_nome_descritivo_longo(name)
         if nome_descritivo_longo:
             self.stats["nomes_descritivos_longos"] += 1
 

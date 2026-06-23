@@ -54,6 +54,32 @@ class TestDescriptiveNameDetector(unittest.TestCase):
         # '.env' → splitext gera ('.env', '') — nome é '.env', 4 chars, falha cond. 1
         self.assertFalse(eh_nome_descritivo_longo(".env"))
 
+    # --- Stopwords em CAIXA ALTA não contam (nomes próprios / registros
+    #     estruturados de export bancário etc.) ---------------------------------
+
+    def test_9_registro_estruturado_caps_nao_e_descritivo(self):
+        # "DO" em "BANCO DO BRASIL" é nome próprio em caixa alta — não conta.
+        # Sem outra stopword minúscula → NÃO é descritivo longo.
+        nome = "(Cobran_347a - BANCO DO BRASIL - Sacado_ AUTO POSTO GASAUTO LTDA) (1).pdf"
+        self.assertFalse(eh_nome_descritivo_longo(nome))
+
+    def test_10_formulario_todo_em_caps_nao_e_descritivo(self):
+        # Todas as stopwords (DE, PARA, COM, EM) em caixa alta → não contam.
+        nome = "FORMULARIO PREVISAO DE VALORES PARA CLIENTES COM NEGOCIOS EM DESENVOLVIMENTO.doc"
+        self.assertFalse(eh_nome_descritivo_longo(nome))
+
+    def test_11_caps_mas_com_conectivo_minusculo_ainda_e_descritivo(self):
+        # Mesmo com nome próprio em caps, se houver conectivo minúsculo de
+        # prosa ("de", "para"), continua sendo frase descritiva.
+        nome = "Relatorio de pagamentos para o BANCO DO BRASIL referente ao mes passado.pdf"
+        self.assertTrue(eh_nome_descritivo_longo(nome))
+
+    def test_12_nome_de_pasta_sem_extensao(self):
+        # Pastas não têm extensão. O detector deve funcionar igual — nome longo,
+        # com conectivos minúsculos, vira candidato.
+        nome = "Comunicado de desligamento dos funcionarios da empresa em 2024"
+        self.assertTrue(eh_nome_descritivo_longo(nome))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

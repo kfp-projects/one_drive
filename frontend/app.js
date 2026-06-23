@@ -1527,6 +1527,7 @@ function setupRenameView() {
     const btnSample = document.getElementById('btn-rename-sample');
     const btnAll = document.getElementById('btn-rename-all');
     const btnApply = document.getElementById('btn-rename-apply');
+    const btnApproveAll = document.getElementById('btn-rename-bulk-approve-all');
     const btnApproveAlta = document.getElementById('btn-rename-bulk-approve-alta');
     const btnRejectBaixa = document.getElementById('btn-rename-bulk-reject-baixa');
     const btnExport = document.getElementById('btn-rename-export');
@@ -1539,6 +1540,7 @@ function setupRenameView() {
     btnSample.addEventListener('click', () => startRenameSuggestions('sample'));
     btnAll.addEventListener('click', () => startRenameSuggestions('all'));
     btnApply.addEventListener('click', applyApprovedRenames);
+    if (btnApproveAll) btnApproveAll.addEventListener('click', approveAllPending);
     btnApproveAlta.addEventListener('click', () => bulkUpdate('Alta', 'aprovada'));
     btnRejectBaixa.addEventListener('click', () => bulkUpdate('Baixa', 'recusada'));
     btnExport.addEventListener('click', exportRenameCsv);
@@ -1639,6 +1641,29 @@ async function loadRenameResults() {
     }
 }
 
+// Marca colisões client-side: 2+ arquivos da mesma pasta com o mesmo nome
+// sugerido. Recalculado a cada render (reflete edições na hora). Espelha a
+// lógica de annotate_collisions() no backend.
+function computeRenameCollisions() {
+    const groups = new Map();
+    for (const r of renameResults) {
+        const fp = r.full_path || '';
+        const folder = fp.replace(/[\\/][^\\/]+$/, '').toLowerCase();
+        const name = (r.nome_sugerido || '').trim().toLowerCase();
+        r._collision = false;
+        r._collisionCount = 0;
+        if (!name) continue;
+        const key = folder + ' ' + name;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(r);
+    }
+    for (const grp of groups.values()) {
+        if (grp.length > 1) {
+            for (const r of grp) { r._collision = true; r._collisionCount = grp.length; }
+        }
+    }
+}
+
 function renderRenameList() {
     const listEl = document.getElementById('rename-list');
     const emptyEl = document.getElementById('rename-empty');
@@ -1657,12 +1682,27 @@ function renderRenameList() {
     summaryEl.style.display = 'grid';
     filterEl.style.display = 'flex';
 
+    // Detecta colisões antes de renderizar (sempre fresco).
+    computeRenameCollisions();
+
     // Resumo
     const totals = { pendente: 0, aprovada: 0, recusada: 0 };
-    let cacheHits = 0, apiCalls = 0;
+    let cacheHits = 0, apiCalls = 0, collisionCount = 0;
     for (const r of renameResults) {
         totals[r.status] = (totals[r.status] || 0) + 1;
         if (r.from_cache) cacheHits++; else apiCalls++;
+        if (r._collision) collisionCount++;
+    }
+
+    // Banner de aviso de colisão no topo da lista.
+    const bannerEl = document.getElementById('rename-collision-banner');
+    if (bannerEl) {
+        if (collisionCount > 0) {
+            bannerEl.style.display = 'flex';
+            bannerEl.innerHTML = `<i class="ph ph-warning-octagon"></i> <strong>${collisionCount}</strong> arquivo(s) ficariam com o <strong>mesmo nome</strong> de outro na mesma pasta. Edite-os antes de aplicar — não podem ser aprovados assim.`;
+        } else {
+            bannerEl.style.display = 'none';
+        }
     }
     document.getElementById('rename-total').innerText = renameResults.length;
     document.getElementById('rename-pending').innerText = totals.pendente;
@@ -1701,10 +1741,17 @@ function renderRenameCard(r) {
     ).join('');
     const editedBadge = r.edited ? '<span class="rename-badge edited"><i class="ph ph-pencil"></i> Editado</span>' : '';
     const errBadge = r.error ? '<span class="rename-badge error"><i class="ph ph-warning"></i> Erro IA</span>' : '';
+    const isCollision = !!r._collision;
+    const collisionBadge = isCollision
+        ? `<span class="rename-badge collision"><i class="ph ph-warning-octagon"></i> Nome repetido (${r._collisionCount})</span>`
+        : '';
+    const dirBadge = r.is_dir
+        ? '<span class="rename-badge dir"><i class="ph ph-folder"></i> Pasta</span>'
+        : '';
     const fullPathAttr = escapeHtml(fullPath);
 
     return `
-        <div class="rename-card status-${r.status}" data-path="${fullPathAttr}">
+        <div class="rename-card status-${r.status}${isCollision ? ' has-collision' : ''}" data-path="${fullPathAttr}">
             <div class="rename-card-body">
                 <div class="rename-card-folder" title="${escapeHtml(folder)}">
                     <i class="ph ph-folder-notch"></i>
@@ -1722,6 +1769,8 @@ function renderRenameCard(r) {
                 </div>
                 <div class="rename-meta">
                     <span class="rename-badge confianca-${conf}">${escapeHtml(r.confianca || 'Media')}</span>
+                    ${dirBadge}
+                    ${collisionBadge}
                     ${editedBadge}
                     ${errBadge}
                     ${chips}
@@ -1729,7 +1778,7 @@ function renderRenameCard(r) {
                 ${r.motivo ? `<div class="rename-motivo">${escapeHtml(r.motivo)}</div>` : ''}
             </div>
             <div class="rename-actions">
-                <button class="btn-approve ${isApproved ? 'active' : ''}" data-action="approve" title="Aprovar">
+                <button class="btn-approve ${isApproved ? 'active' : ''}" data-action="approve" title="${isCollision ? 'Resolva o nome repetido antes de aprovar' : 'Aprovar'}"${isCollision ? ' disabled' : ''}>
                     <i class="ph ph-check"></i> Aprovar
                 </button>
                 <button class="btn-reject ${isRejected ? 'active' : ''}" data-action="reject" title="Recusar">
@@ -1763,6 +1812,13 @@ async function onRenameListClick(e) {
     if (!record) return;
 
     if (action === 'approve') {
+        if (record._collision) {
+            await showCustomAlert(
+                'Nome repetido',
+                'Esse nome sugerido é igual ao de outro arquivo na mesma pasta. Edite um dos dois antes de aprovar — senão eles colidiriam no disco.'
+            );
+            return;
+        }
         await callRenameUpdate('/api/rename/approve', { full_path: path });
         record.status = 'aprovada';
         renderRenameList();
@@ -1824,9 +1880,21 @@ async function callRenameUpdate(endpoint, body) {
 }
 
 async function bulkUpdate(confianca, newStatus) {
-    const targets = renameResults.filter(r => r.confianca === confianca && r.status === 'pendente');
+    // Recalcula colisões antes de agir em lote.
+    computeRenameCollisions();
+    let targets = renameResults.filter(r => r.confianca === confianca && r.status === 'pendente');
+    let blockedByCollision = 0;
+    // Aprovação em lote nunca inclui itens que colidem.
+    if (newStatus === 'aprovada') {
+        const before = targets.length;
+        targets = targets.filter(r => !r._collision);
+        blockedByCollision = before - targets.length;
+    }
     if (targets.length === 0) {
-        await showCustomAlert('Aviso', `Nenhuma sugestão pendente com confiança ${confianca}.`);
+        const extra = blockedByCollision > 0
+            ? ` (${blockedByCollision} ignorado(s) por nome repetido — edite antes de aprovar)`
+            : '';
+        await showCustomAlert('Aviso', `Nenhuma sugestão pendente aprovável com confiança ${confianca}${extra}.`);
         return;
     }
     const verb = newStatus === 'aprovada' ? 'aprovar' : 'recusar';
@@ -1843,6 +1911,35 @@ async function bulkUpdate(confianca, newStatus) {
         callRenameUpdate(endpoint, { full_path: t.full_path })
     ));
     for (const t of targets) t.status = newStatus;
+    renderRenameList();
+}
+
+async function approveAllPending() {
+    // Aprova TODOS os pendentes de uma vez, exceto os que colidem (nome
+    // repetido na mesma pasta) — esses precisam de ajuste manual.
+    computeRenameCollisions();
+    const targets = renameResults.filter(r => r.status === 'pendente' && !r._collision);
+    const blocked = renameResults.filter(r => r.status === 'pendente' && r._collision).length;
+    if (targets.length === 0) {
+        const extra = blocked > 0 ? ` ${blocked} item(ns) ficaram de fora por nome repetido — edite-os antes.` : '';
+        await showCustomAlert('Aviso', `Nenhuma sugestão pendente aprovável.${extra}`);
+        return;
+    }
+    const aviso = blocked > 0
+        ? `\n\n⚠ ${blocked} item(ns) com nome repetido NÃO serão aprovados (precisam de ajuste manual).`
+        : '';
+    const ok = await showCustomConfirm(
+        'Aprovar todas',
+        `Aprovar ${targets.length} sugestão(ões) pendente(s) de uma vez?${aviso}\n\nNada é renomeado ainda — você revisa e clica em "Aplicar Aprovadas" depois.`,
+        'Aprovar todas',
+        'Cancelar'
+    );
+    if (!ok) return;
+
+    await Promise.all(targets.map(t =>
+        callRenameUpdate('/api/rename/approve', { full_path: t.full_path })
+    ));
+    for (const t of targets) t.status = 'aprovada';
     renderRenameList();
 }
 

@@ -301,6 +301,9 @@
                             <option value="aprovada">Aprovadas</option>
                             <option value="recusada">Recusadas</option>
                         </select>
+                        <button id="btn-rename-bulk-approve-all" class="btn-secondary btn-small" type="button">
+                            <i class="ph ph-checks"></i> Aprovar todas
+                        </button>
                         <button id="btn-rename-bulk-approve-alta" class="btn-secondary btn-small" type="button">
                             <i class="ph ph-check-circle"></i> Aprovar Alta
                         </button>
@@ -324,6 +327,8 @@
                         <div class="spinner"></div>
                         <span id="rename-loading-text">Gerando sugestões…</span>
                     </div>
+
+                    <div id="rename-collision-banner" class="rename-collision-banner" style="display:none;"></div>
 
                     <div id="rename-list" class="rename-list"></div>
                 </section>

@@ -1489,6 +1489,33 @@ button:disabled {
 .rename-badge.confianca-baixa { background: #fee2e2; color: #991b1b; }
 .rename-badge.edited          { background: #ddd6fe; color: #5b21b6; }
 .rename-badge.error           { background: #fee2e2; color: #991b1b; }
+.rename-badge.collision       { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+.rename-badge.dir             { background: #e0e7ff; color: #3730a3; }
+
+/* Card com colisão: borda vermelha pra saltar aos olhos na lista. */
+.rename-card.has-collision {
+    border: 1.5px solid #f87171;
+    background: #fff5f5;
+}
+.rename-card.has-collision .btn-approve[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Banner de aviso de colisão no topo da lista. */
+.rename-collision-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    background: #fef2f2;
+    border: 1px solid #fca5a5;
+    color: #991b1b;
+    font-size: 13px;
+}
+.rename-collision-banner i { font-size: 18px; flex-shrink: 0; }
 .rename-chip {
     background: #eff6ff;
     color: #1e40af;

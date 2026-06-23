@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,21 +30,26 @@ from config import config
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 RENAME_CACHE_FILE = os.path.join(config.OUTPUT_DIR, "rename_cache.json")
 
-# SYSTEM_PROMPT v2 — 2026-05-19
-# Mudança em relação à v1: regra 5 agora usa ESPAÇOS naturais entre palavras
-# (em vez de underscore). OneDrive/SharePoint suporta espaços e nomes ficam
-# mais legíveis. Cache antigo (underscore) foi movido pra .legacy_underscore.json.
-SYSTEM_PROMPT = """Você é um agente de renomeação de arquivos corporativos. Sua função é reescrever nomes de arquivos que estão em formato de frase descritiva, transformando-os em nomes curtos, claros e padronizados.
+# Versão do prompt. Mudou o prompt => cache antigo é invalidado automaticamente
+# (suas sugestões foram geradas com regras diferentes e não devem ser reusadas).
+PROMPT_VERSION = "v3-2026-06-22-agressivo"
+
+# SYSTEM_PROMPT v3 — 2026-06-22
+# Mudança em relação à v2: encurtamento AGRESSIVO. Alvo caiu de 20-50 para
+# 15-30 chars. Mantém no máximo ~4 palavras significativas + códigos/datas/
+# siglas obrigatórios. Descarta tipos-de-documento genéricos quando há um
+# assunto claro. Cache v2 invalidado por PROMPT_VERSION.
+SYSTEM_PROMPT = """Você é um agente de renomeação de arquivos corporativos. Sua função é reescrever nomes longos e descritivos transformando-os em nomes CURTOS, claros e padronizados. Priorize brevidade: nomes enxutos são o objetivo principal.
 
 REGRAS:
 
-1. PRESERVAR SIGNIFICADO: O nome novo deve manter o conceito central do nome original.
+1. SEJA AGRESSIVO NO CORTE: o nome final deve ser o MAIS CURTO possível que ainda identifique o documento sem ambiguidade. Menos é mais. Na dúvida entre duas palavras, fique com a mais informativa e descarte a outra.
 
 2. REMOVER PALAVRAS DE CONEXÃO: descartar "de, do, da, dos, das, que, para, como, em, com, e, o, a, os, as, no, na" e similares.
 
-3. REMOVER PALAVRAS VAZIAS: "como fica", "informações sobre", "documento referente a", "questões relacionadas a" — descartar.
+3. REMOVER PALAVRAS VAZIAS E REDUNDANTES: "como fica", "informações sobre", "documento referente a", "questões relacionadas a", "termo de", "relativo a". Também descartar tipos-de-documento genéricos ("documento", "arquivo", "planilha") QUANDO o assunto já estiver claro. Manter o tipo só quando ele for a informação central (ex.: "Contrato", "NF-e").
 
-4. PRESERVAR INFORMAÇÃO ESPECÍFICA: nomes próprios (pessoas, empresas, clientes), datas, números de processo, códigos. NUNCA descartar.
+4. PRESERVAR INFORMAÇÃO ESPECÍFICA (NUNCA DESCARTAR): nomes próprios (pessoas, empresas, clientes), datas, números de processo, CNPJ, códigos, percentuais, siglas e localização (estado/filial). Essa informação é o que distingue um arquivo de outro parecido — ela tem prioridade sobre a brevidade.
 
 5. FORMATO DE SAÍDA: Title Case com espaços naturais entre palavras. Manter extensão original.
    - Usar espaço simples (" ") entre palavras, NUNCA underscore.
@@ -53,36 +59,36 @@ REGRAS:
    - Não usar dois espaços seguidos. Colapsar múltiplos espaços em um único.
    - Não começar nem terminar com espaço.
 
-6. TAMANHO ALVO: entre 20 e 50 caracteres no nome final (sem contar extensão). Se não conseguir ficar abaixo de 50, priorizar preservação de informação sobre tamanho.
+6. TAMANHO ALVO: entre 15 e 30 caracteres no nome final (sem contar extensão). Mire em no máximo ~4 palavras significativas. Só ultrapasse 30 se for estritamente necessário pra preservar a informação específica da regra 4 (nome próprio + data + código, por exemplo).
 
-7. SE EM DÚVIDA SOBRE O QUE PRESERVAR: preservar mais informação.
+7. SE EM DÚVIDA: corte mais — desde que a informação específica da regra 4 permaneça intacta.
 
 EXEMPLOS:
 
 EXEMPLO 1:
 Original: "Como fica os acessos aos números que fazem parte da do grupo da empresa.docx"
-Sugerido: "Acessos Numeros Grupo Empresa.docx"
-Motivo: Removidas palavras de conexão e pergunta retórica; preservados os 4 substantivos centrais; espaços naturais.
+Sugerido: "Acessos Grupo Empresa.docx"
+Motivo: Cortado ao essencial; 3 palavras-chave bastam pra identificar.
 
 EXEMPLO 2:
 Original: "Contrato Joao Silva 2024 prestacao de servicos contabeis mensais.pdf"
-Sugerido: "Contrato Joao Silva 2024 Servicos Contabeis.pdf"
-Motivo: Preservado nome do cliente, ano e tipo de serviço; espaços mantidos como separador natural.
+Sugerido: "Contrato Joao Silva 2024.pdf"
+Motivo: Preservado tipo central, cliente e ano; descrição do serviço cortada por brevidade.
 
 EXEMPLO 3:
-Original: "Documento referente a questao do pagamento atrasado do cliente XPTO.docx"
-Sugerido: "Pagamento Atrasado Cliente XPTO.docx"
-Motivo: Removidas frases vazias; preservado nome do cliente em sigla; sem underscores.
+Original: "Termo de Término do Contrato de Experiência Antecipado Guilherme Pereira (RS) KFP SUL.docx"
+Sugerido: "Termino Contrato Guilherme RS KFP.docx"
+Motivo: Removido "Termo de", "Experiência" e "Antecipado"; preservados pessoa, estado e sigla.
 
 EXEMPLO 4:
 Original: "Email enviado pela diretoria sobre as novas regras de home office em 2024.pdf"
-Sugerido: "Diretoria Regras Home Office 2024.pdf"
-Motivo: Removido verbo e preposições; preservados autor, tema e ano.
+Sugerido: "Regras Home Office 2024.pdf"
+Motivo: Cortado autor e verbo; tema + ano bastam.
 
 EXEMPLO 5:
 Original: "03 - AR NOTA FISCAL KFP AL (2018, 19, 20 e 21) com 12,5%.xlsx"
-Sugerido: "AR Nota Fiscal KFP-AL 2018 2019 2020 2021 12,5%.xlsx"
-Motivo: Removido prefixo numérico isolado ("03 -") e palavra de conexão ("com"); anos abreviados (19, 20, 21) expandidos para forma completa; sigla composta KFP-AL preservada com hífen; percentual mantido como informação relevante.
+Sugerido: "AR NF KFP-AL 2018-2021 12,5%.xlsx"
+Motivo: Prefixo solto removido; "Nota Fiscal" abreviada para NF; anos em intervalo; sigla, estado e percentual preservados (informação específica).
 
 Confiança:
 - Alta: nome original tem estrutura clara, substantivos identificáveis sem ambiguidade.
@@ -108,16 +114,25 @@ Responda SEMPRE em JSON estrito no formato:
 _cache_lock = threading.Lock()
 
 
+_VERSION_KEY = "__prompt_version__"
+
+
 def load_cache() -> dict:
+    """Carrega o cache. Se a versão do prompt mudou, ignora o cache inteiro
+    (as sugestões antigas foram geradas com regras diferentes)."""
     try:
         with open(RENAME_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if data.get(_VERSION_KEY) != PROMPT_VERSION:
+            return {_VERSION_KEY: PROMPT_VERSION}
+        return data
     except Exception:
-        return {}
+        return {_VERSION_KEY: PROMPT_VERSION}
 
 
 def save_cache(cache: dict) -> None:
     try:
+        cache[_VERSION_KEY] = PROMPT_VERSION
         os.makedirs(os.path.dirname(RENAME_CACHE_FILE), exist_ok=True)
         with open(RENAME_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -136,12 +151,44 @@ def cache_key_for_path(path_str: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Preservação de sufixo de duplicata: " (1)", " (2)" no fim do nome.
+# A regra 5 do prompt manda descartar números soltos, mas o sufixo de
+# duplicata carrega INFORMAÇÃO (distingue cópias do mesmo documento). Sem
+# isso, "X (1).pdf" e "X (2).pdf" colidiriam para o mesmo nome sugerido.
+# ---------------------------------------------------------------------------
+
+_DUP_SUFFIX_RE = re.compile(r"\s*\((\d+)\)\s*$")
+
+
+def preservar_sufixo_duplicata(original_name: str, suggested_name: str) -> str:
+    """Se o nome original termina com '(N)', garante que o sugerido também."""
+    if not suggested_name:
+        return suggested_name
+    orig_stem, _ = os.path.splitext(original_name or "")
+    m = _DUP_SUFFIX_RE.search(orig_stem)
+    if not m:
+        return suggested_name
+    sugg_stem, sugg_ext = os.path.splitext(suggested_name)
+    # Já tem algum '(N)' no fim? Não duplica.
+    if _DUP_SUFFIX_RE.search(sugg_stem):
+        return suggested_name
+    return f"{sugg_stem.rstrip()} ({m.group(1)}){sugg_ext}"
+
+
+# ---------------------------------------------------------------------------
 # Chamada à IA
 # ---------------------------------------------------------------------------
 
-def suggest_one(client: genai.Client, original_name: str, max_attempts: int = 2) -> dict:
+def suggest_one(client: genai.Client, original_name: str, max_attempts: int = 2,
+                is_dir: bool = False) -> dict:
     """Pede uma sugestão de renome ao Flash-Lite. Retorna o dict do schema."""
-    user_text = f"Reescreva este nome de arquivo: {original_name}"
+    if is_dir:
+        user_text = (
+            "Reescreva este nome de PASTA (diretório, NÃO tem extensão de "
+            f"arquivo — não adicione nenhuma): {original_name}"
+        )
+    else:
+        user_text = f"Reescreva este nome de arquivo: {original_name}"
     last_err: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -158,10 +205,17 @@ def suggest_one(client: genai.Client, original_name: str, max_attempts: int = 2)
             if not text:
                 raise ValueError("Resposta vazia do Gemini.")
             data = json.loads(text)
+            nome_sugerido = (data.get("nome_sugerido") or "").strip()
+            # Pasta não tem extensão: se a IA inventou uma (".docx" etc.),
+            # remove. Heurística simples: tira o último sufixo .xxx curto.
+            if is_dir:
+                base, ext = os.path.splitext(nome_sugerido)
+                if ext and len(ext) <= 6:
+                    nome_sugerido = base
             # Normalização: garante campos esperados
             return {
                 "nome_original": data.get("nome_original") or original_name,
-                "nome_sugerido": (data.get("nome_sugerido") or "").strip(),
+                "nome_sugerido": nome_sugerido,
                 "confianca": (data.get("confianca") or "Media").strip().capitalize(),
                 "motivo": (data.get("motivo") or "")[:200],
                 "informacao_preservada": data.get("informacao_preservada") or [],
@@ -192,7 +246,13 @@ def load_descriptive_files_from_latest_report() -> list[dict]:
     with open(os.path.join(config.REPORTS_DIR, latest), "r", encoding="utf-8") as f:
         data = json.load(f)
     records = data.get("issues", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-    return [r for r in records if r.get("nome_descritivo_longo")]
+    # Só arquivos descritivos longos E que NÃO sejam compartilhados/bloqueados.
+    # Itens compartilhados (frozen) nunca podem ser renomeados — ficam de fora
+    # do lote da IA por completo.
+    return [
+        r for r in records
+        if r.get("nome_descritivo_longo") and not r.get("is_shared")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -241,36 +301,54 @@ def run_worker(state: SuggestState, api_key: str, files: list[dict], mode: str) 
         def process(rec: dict) -> Optional[dict]:
             orig_name = rec.get("original_name") or ""
             full_path = rec.get("full_path") or ""
+            is_shared = bool(rec.get("is_shared"))
+            is_dir = bool(rec.get("is_dir"))
             if not orig_name:
+                return None
+            # Defesa em profundidade: itens compartilhados/bloqueados NUNCA
+            # devem virar candidatos. A seleção já filtra, mas reforçamos aqui.
+            if is_shared:
                 return None
             ck = cache_key_for_path(full_path)
             if ck and ck in cache:
                 cached = cache[ck]
                 with state.lock:
                     state.cache_hits += 1
-                return {
+                result = {
                     **cached,
                     "full_path": full_path,
                     "original_name": orig_name,
+                    "is_shared": is_shared,
+                    "is_dir": is_dir,
                     "status": "pendente",
                     "edited": False,
                     "from_cache": True,
                 }
+                result["nome_sugerido"] = preservar_sufixo_duplicata(
+                    orig_name, result.get("nome_sugerido", "")
+                )
+                return result
             try:
-                sugg = suggest_one(client, orig_name)
+                sugg = suggest_one(client, orig_name, is_dir=is_dir)
                 with state.lock:
                     state.api_calls += 1
                 if ck:
                     with _cache_lock:
                         cache[ck] = sugg
-                return {
+                result = {
                     **sugg,
                     "full_path": full_path,
                     "original_name": orig_name,
+                    "is_shared": is_shared,
+                    "is_dir": is_dir,
                     "status": "pendente",
                     "edited": False,
                     "from_cache": False,
                 }
+                result["nome_sugerido"] = preservar_sufixo_duplicata(
+                    orig_name, result.get("nome_sugerido", "")
+                )
+                return result
             except Exception as e:
                 return {
                     "nome_original": orig_name,
@@ -281,6 +359,8 @@ def run_worker(state: SuggestState, api_key: str, files: list[dict], mode: str) 
                     "informacao_descartada": [],
                     "full_path": full_path,
                     "original_name": orig_name,
+                    "is_shared": is_shared,
+                    "is_dir": is_dir,
                     "status": "pendente",
                     "edited": False,
                     "from_cache": False,
@@ -312,3 +392,32 @@ def select_sample(files: list[dict], n: int = 50) -> list[dict]:
     if len(files) <= n:
         return list(files)
     return random.sample(files, n)
+
+
+# ---------------------------------------------------------------------------
+# Detector de colisão: dois arquivos da MESMA pasta com o MESMO nome sugerido.
+# É o risco central de encurtar nomes parecidos — a parte que os distinguia
+# pode sumir. Marcamos esses casos pra que a UI avise e a aplicação bloqueie.
+# ---------------------------------------------------------------------------
+
+def annotate_collisions(results: list[dict]) -> list[dict]:
+    """Adiciona 'collision' (bool) e 'collision_count' a cada resultado.
+
+    Colisão = mesma pasta + mesmo nome_sugerido (case-insensitive) em 2+ itens.
+    Muta e devolve a própria lista.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for r in results:
+        folder = os.path.dirname(r.get("full_path", "") or "")
+        name = (r.get("nome_sugerido") or "").strip().lower()
+        if not name:
+            r["collision"] = False
+            r["collision_count"] = 0
+            continue
+        groups.setdefault((folder.lower(), name), []).append(r)
+    for grp in groups.values():
+        collide = len(grp) > 1
+        for r in grp:
+            r["collision"] = collide
+            r["collision_count"] = len(grp) if collide else 0
+    return results

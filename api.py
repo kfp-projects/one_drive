@@ -658,6 +658,7 @@ from remediation.rename_suggester import (
     SuggestState, run_worker as run_rename_worker,
     select_sample as rename_select_sample,
     load_descriptive_files_from_latest_report,
+    annotate_collisions,
 )
 from remediation.onedrive_compliance import analyze as onedrive_analyze
 
@@ -732,13 +733,19 @@ def rename_results():
     """Devolve todos os resultados acumulados (amostra ou lote completo)."""
     with _rename_state.lock:
         results = list(_rename_state.results)
+    # Marca colisões (mesma pasta + mesmo nome sugerido) pra a UI avisar.
+    annotate_collisions(results)
     summary = {"pendente": 0, "aprovada": 0, "recusada": 0}
+    collisions = 0
     for r in results:
         summary[r.get("status", "pendente")] = summary.get(r.get("status", "pendente"), 0) + 1
+        if r.get("collision"):
+            collisions += 1
     return {
         "results": results,
         "summary": summary,
         "total": len(results),
+        "collisions": collisions,
     }
 
 
@@ -802,22 +809,60 @@ def rename_apply():
     if not approved:
         raise HTTPException(400, detail="Nenhuma sugestão aprovada para aplicar.")
 
+    # ORDEM CRÍTICA: renomear do mais PROFUNDO pro mais RASO (filhos antes dos
+    # pais). Se uma pasta fosse renomeada antes dos arquivos/subpastas dentro
+    # dela, o caminho guardado dos filhos ficaria inválido e a renomeação deles
+    # falharia. Ordenar por número de separadores no caminho (desc) garante que
+    # todo conteúdo é renomeado antes do diretório que o contém.
+    def _depth(r: dict) -> int:
+        p = r.get("full_path", "") or ""
+        return p.replace("/", "\\").count("\\")
+    approved.sort(key=_depth, reverse=True)
+
+    # Pré-cálculo de colisões: 2+ aprovados (não compartilhados) que cairiam no
+    # MESMO nome final dentro da MESMA pasta. Esses NÃO são aplicados — em vez
+    # de renomear pra "X (1)/X (2)" arbitrário (que apagaria a distinção
+    # original), bloqueamos e devolvemos pra ajuste manual.
+    target_counts: dict[tuple, int] = {}
+    for r in approved:
+        if r.get("is_shared"):
+            continue
+        src = Path(r.get("full_path", ""))
+        new_name = (r.get("nome_sugerido") or "").strip()
+        if not new_name:
+            continue
+        key = (str(src.parent).lower(), new_name.lower())
+        target_counts[key] = target_counts.get(key, 0) + 1
+
     os.makedirs(config.REMEDIATION_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     rollback_path = os.path.join(config.REMEDIATION_DIR, f"rollback_renames_{timestamp}.csv")
 
     renamed = 0
     skipped_missing = 0
+    skipped_shared = 0
+    skipped_collision = 0
     errors: list[str] = []
+    collisions: list[str] = []
     rollback_rows: list[dict] = []
 
     for r in approved:
+        # Trava de segurança: nunca renomear item compartilhado/bloqueado.
+        if r.get("is_shared"):
+            skipped_shared += 1
+            continue
         src = Path(r.get("full_path", ""))
         new_name = (r.get("nome_sugerido") or "").strip()
         if not src.exists():
             skipped_missing += 1
             continue
         if not new_name or new_name == src.name:
+            continue
+        # Colisão entre aprovados: pula e reporta, não inventa sufixo.
+        key = (str(src.parent).lower(), new_name.lower())
+        if target_counts.get(key, 0) > 1:
+            skipped_collision += 1
+            collisions.append(f"{src.name} → {new_name}")
             continue
         dst = src.parent / new_name
         try:
@@ -854,6 +899,9 @@ def rename_apply():
     return {
         "renamed": renamed,
         "skipped_missing": skipped_missing,
+        "skipped_shared": skipped_shared,
+        "skipped_collision": skipped_collision,
+        "collisions_sample": collisions[:10],
         "errors_count": len(errors),
         "errors_sample": errors[:10],
         "rollback_manifest": rollback_path if rollback_rows else None,

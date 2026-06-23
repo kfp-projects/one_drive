@@ -478,14 +478,16 @@ def get_latest_report():
         }
     }
 
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+_BASE = os.path.dirname(os.path.abspath(__file__))
+# Serve a UI nova (web/dist, build do React/Vite); cai pra frontend/ antigo
+# enquanto a Fase 2 não estiver buildada.
+_WEB_DIST = os.path.join(_BASE, "web", "dist")
+FRONTEND_DIR = _WEB_DIST if os.path.isdir(_WEB_DIST) else os.path.join(_BASE, "frontend")
 
 if os.path.isdir(FRONTEND_DIR):
     @app.get("/")
     def serve_index():
         return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
-
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="frontend")
 
     @app.get("/{filename:path}")
     def serve_frontend_file(filename: str):
@@ -494,4 +496,5 @@ if os.path.isdir(FRONTEND_DIR):
         full_path = os.path.join(FRONTEND_DIR, filename)
         if os.path.isfile(full_path):
             return FileResponse(full_path)
-        raise HTTPException(status_code=404, detail="Not Found")
+        # SPA fallback: rotas desconhecidas voltam pro index.
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))

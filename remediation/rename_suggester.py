@@ -395,6 +395,140 @@ def select_sample(files: list[dict], n: int = 50) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Desambiguação: resolve colisões mandando o GRUPO inteiro pra IA de uma vez,
+# pedindo nomes distintos que preservem o diferenciador (mês, número, cópia).
+# É o que faltava no fluxo original — a IA via cada arquivo isolado e não tinha
+# como saber que um "irmão" ia receber o mesmo nome.
+# ---------------------------------------------------------------------------
+
+DISAMBIG_PROMPT = """Você recebe uma lista de arquivos da MESMA pasta que receberam nomes sugeridos IGUAIS ou quase iguais — eles colidiriam no disco. Sua tarefa é reescrever cada um com um nome CURTO e ÚNICO dentro do grupo.
+
+REGRAS (em ordem de prioridade):
+
+1. UNICIDADE: cada nome final DEVE ser diferente de todos os outros do grupo. Essa é a prioridade máxima — nunca repita.
+
+2. PRESERVAR O DIFERENCIADOR: identifique o que distingue um arquivo do outro no nome ORIGINAL — mês (Janeiro, Fevereiro... ou Jan, Fev), ano, número sequencial, "Copia"/"Cópia N", "Parte N", sigla, etc. — e MANTENHA isso no nome novo. É justamente o que tinha sido cortado e causou a colisão.
+
+3. ESTILO: Title Case com espaços, siglas em maiúsculo (KFP, NF, AL, PE), manter a extensão original. Sem underscore.
+
+4. CURTO, mas a UNICIDADE vence a brevidade: pode passar de 30 chars se for preciso pra diferenciar.
+
+5. Preservar nomes próprios, datas, códigos e percentuais.
+
+Responda SEMPRE em JSON estrito, incluindo TODOS os itens recebidos:
+{"itens": [{"nome_original": "...", "nome_sugerido": "..."}, ...]}
+"""
+
+
+def _forcar_unicidade(items: list[dict]) -> None:
+    """Último recurso determinístico: se a IA ainda deixou nomes iguais no
+    grupo, adiciona ' (2)', ' (3)'… preservando a extensão. Muta os items."""
+    vistos: dict[str, int] = {}
+    for it in items:
+        nome = it.get("nome_sugerido") or ""
+        chave = nome.lower()
+        if chave not in vistos:
+            vistos[chave] = 1
+        else:
+            vistos[chave] += 1
+            stem, ext = os.path.splitext(nome)
+            it["nome_sugerido"] = f"{stem.rstrip()} ({vistos[chave]}){ext}"
+
+
+def disambiguate_group(client: genai.Client, items: list[dict],
+                       max_attempts: int = 2) -> dict[str, str]:
+    """Recebe os items de um grupo que colide e devolve {nome_original: novo}.
+
+    Faz UMA chamada à IA com todos os nomes juntos. Em falha, devolve {} e o
+    chamador mantém os nomes atuais (continuam marcados como colisão).
+    """
+    originais = [it.get("original_name", "") for it in items]
+    linhas = "\n".join(f"{i+1}. {o}" for i, o in enumerate(originais))
+    user_text = (
+        f"Pasta: {os.path.dirname(items[0].get('full_path', ''))}\n"
+        f"São {len(originais)} arquivos que colidiriam. Nomes ORIGINAIS:\n{linhas}\n\n"
+        "Reescreva cada um com nome curto e ÚNICO, preservando o que os diferencia."
+    )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[user_text],
+                config=types.GenerateContentConfig(
+                    system_instruction=DISAMBIG_PROMPT,
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            data = json.loads(response.text or "{}")
+            mapa: dict[str, str] = {}
+            for entry in data.get("itens", []):
+                orig = (entry.get("nome_original") or "").strip()
+                novo = (entry.get("nome_sugerido") or "").strip()
+                if orig and novo:
+                    mapa[orig] = novo
+            if mapa:
+                return mapa
+        except Exception:
+            if attempt < max_attempts:
+                time.sleep(2 ** attempt)
+    return {}
+
+
+def resolve_collisions_worker(state: "SuggestState", api_key: str,
+                              results: list[dict]) -> None:
+    """Resolve TODOS os grupos que colidem, em paralelo. Atualiza results in
+    place (nome_sugerido + flags) e re-anota colisões ao final."""
+    from datetime import datetime
+    try:
+        annotate_collisions(results)
+        # Agrupa colidentes por (pasta, nome_sugerido)
+        grupos: dict[tuple, list[dict]] = {}
+        for r in results:
+            if r.get("collision"):
+                folder = os.path.dirname(r.get("full_path", "") or "")
+                name = (r.get("nome_sugerido") or "").strip().lower()
+                grupos.setdefault((folder.lower(), name), []).append(r)
+
+        with state.lock:
+            state.total = len(grupos)
+            state.done = 0
+
+        client = genai.Client(api_key=api_key)
+
+        def process(group_items: list[dict]) -> None:
+            mapa = disambiguate_group(client, group_items)
+            for it in group_items:
+                novo = mapa.get(it.get("original_name", ""))
+                if novo:
+                    novo = preservar_sufixo_duplicata(it.get("original_name", ""), novo)
+                    it["nome_sugerido"] = novo
+                    it["edited"] = True
+                    it["disambiguated"] = True
+            # Garante unicidade dentro do grupo mesmo se a IA falhar
+            _forcar_unicidade(group_items)
+            with state.lock:
+                state.done += 1
+                state.api_calls += 1
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(process, g) for g in grupos.values()]
+            for _ in as_completed(futures):
+                pass
+
+        # Re-anota: o que ainda colidir (raro) continua marcado
+        annotate_collisions(results)
+        with state.lock:
+            state.running = False
+            state.completed_at = datetime.now().isoformat()
+    except Exception as e:
+        with state.lock:
+            state.running = False
+            state.error = f"{type(e).__name__}: {e}"
+            state.completed_at = datetime.now().isoformat()
+
+
+# ---------------------------------------------------------------------------
 # Detector de colisão: dois arquivos da MESMA pasta com o MESMO nome sugerido.
 # É o risco central de encurtar nomes parecidos — a parte que os distinguia
 # pode sumir. Marcamos esses casos pra que a UI avise e a aplicação bloqueie.

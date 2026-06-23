@@ -659,6 +659,7 @@ from remediation.rename_suggester import (
     select_sample as rename_select_sample,
     load_descriptive_files_from_latest_report,
     annotate_collisions,
+    resolve_collisions_worker,
 )
 from remediation.onedrive_compliance import analyze as onedrive_analyze
 
@@ -726,6 +727,55 @@ def rename_suggest_all():
 @app.get("/api/rename/status")
 def rename_status():
     return _rename_state.snapshot()
+
+
+# --- Desambiguação de colisões (passe que dá contexto de "irmãos" à IA) ------
+
+_disambig_state = SuggestState()
+
+
+@app.post("/api/rename/resolve-collisions")
+def rename_resolve_collisions():
+    """Reescreve os grupos que colidem com nomes distintos (IA vê o grupo todo)."""
+    _ensure_no_classify_running()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(400, detail="GEMINI_API_KEY não configurada no .env")
+
+    with _rename_state.lock:
+        results = _rename_state.results  # mesma lista — atualizada in place
+    annotate_collisions(results)
+    n_colisao = sum(1 for r in results if r.get("collision"))
+    if n_colisao == 0:
+        return {"status": "noop", "detail": "Nenhuma colisão a resolver."}
+
+    with _disambig_state.lock:
+        if _disambig_state.running:
+            raise HTTPException(409, detail="Já existe uma resolução de colisões em andamento.")
+        _disambig_state.running = True
+        _disambig_state.total = 0
+        _disambig_state.done = 0
+        _disambig_state.error = None
+        _disambig_state.api_calls = 0
+        _disambig_state.started_at = datetime.now().isoformat()
+        _disambig_state.completed_at = None
+
+    threading.Thread(
+        target=resolve_collisions_worker,
+        args=(_disambig_state, api_key, results),
+        daemon=True,
+    ).start()
+    return {"status": "started", "collisions": n_colisao}
+
+
+@app.get("/api/rename/resolve-status")
+def rename_resolve_status():
+    snap = _disambig_state.snapshot()
+    with _rename_state.lock:
+        snap["remaining_collisions"] = sum(
+            1 for r in _rename_state.results if r.get("collision")
+        )
+    return snap
 
 
 @app.get("/api/rename/results")

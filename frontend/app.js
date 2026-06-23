@@ -1540,6 +1540,8 @@ function setupRenameView() {
     btnSample.addEventListener('click', () => startRenameSuggestions('sample'));
     btnAll.addEventListener('click', () => startRenameSuggestions('all'));
     btnApply.addEventListener('click', applyApprovedRenames);
+    const btnResolve = document.getElementById('btn-rename-resolve-collisions');
+    if (btnResolve) btnResolve.addEventListener('click', resolveCollisions);
     if (btnApproveAll) btnApproveAll.addEventListener('click', approveAllPending);
     btnApproveAlta.addEventListener('click', () => bulkUpdate('Alta', 'aprovada'));
     btnRejectBaixa.addEventListener('click', () => bulkUpdate('Baixa', 'recusada'));
@@ -1912,6 +1914,66 @@ async function bulkUpdate(confianca, newStatus) {
     ));
     for (const t of targets) t.status = newStatus;
     renderRenameList();
+}
+
+async function resolveCollisions() {
+    computeRenameCollisions();
+    const n = renameResults.filter(r => r._collision).length;
+    if (n === 0) {
+        await showCustomAlert('Sem colisões', 'Não há nomes repetidos para resolver.');
+        return;
+    }
+    const ok = await showCustomConfirm(
+        'Resolver colisões',
+        `Pedir à IA para reescrever ${n} arquivo(s) que colidem, dando nomes DISTINTOS que preservam o que os diferencia (mês, número, cópia)?\n\nA IA recebe cada grupo junto — é o que resolve a raiz do problema.`,
+        'Resolver',
+        'Cancelar'
+    );
+    if (!ok) return;
+
+    const loadingEl = document.getElementById('rename-loading');
+    const loadingText = document.getElementById('rename-loading-text');
+    try {
+        const res = await fetch(`${API_BASE}/api/rename/resolve-collisions`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+            await showCustomAlert('Erro', data.detail || 'Falha ao iniciar.');
+            return;
+        }
+        if (data.status === 'noop') {
+            await showCustomAlert('Sem colisões', data.detail);
+            return;
+        }
+        if (loadingEl) loadingEl.classList.remove('hidden');
+        // Polling
+        await new Promise((resolve) => {
+            const poll = setInterval(async () => {
+                try {
+                    const s = await (await fetch(`${API_BASE}/api/rename/resolve-status`)).json();
+                    if (loadingText) {
+                        loadingText.innerText =
+                            `Resolvendo colisões — ${s.done}/${s.total} grupos · faltam ${s.remaining_collisions} nomes repetidos`;
+                    }
+                    if (!s.running) {
+                        clearInterval(poll);
+                        resolve();
+                    }
+                } catch (e) { /* mantém tentando */ }
+            }, 2000);
+        });
+        if (loadingEl) loadingEl.classList.add('hidden');
+        await loadRenameResults();
+        const restante = renameResults.filter(r => r._collision).length;
+        await showCustomAlert(
+            'Colisões resolvidas',
+            restante === 0
+                ? 'Todas as colisões foram resolvidas com nomes distintos. ✅'
+                : `Resolvidas a maioria. Ainda restam ${restante} nome(s) repetido(s) — edite manualmente esses casos.`
+        );
+    } catch (err) {
+        if (loadingEl) loadingEl.classList.add('hidden');
+        await showCustomAlert('Erro', err.message);
+    }
 }
 
 async function approveAllPending() {

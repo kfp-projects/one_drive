@@ -1,32 +1,71 @@
-# Organizador de Arquivos Corporativos (Corporate Document Sanitation System)
+# Organiza — Saneamento de Documentos para OneDrive
 
-## O que é este projeto? (Explicado de forma simples)
-Imagine que a sua empresa tem milhares de arquivos e pastas espalhados no OneDrive, SharePoint ou servidores locais, criados ao longo de anos por diferentes pessoas. Com o tempo, surgem vários problemas:
-- Os nomes dos arquivos ou pastas ficam gigantescos (o que costuma dar erro no Windows).
-- Existem "pastas dentro de pastas dentro de pastas" tão fundas que ninguém mais acha os documentos.
-- Há fotos, músicas e vídeos pessoais misturados no meio de pastas de trabalho sérias (como as do Financeiro ou do RH), ocupando espaço à toa.
-- Arquivos contêm caracteres que causam falhas nos sistemas de backup.
+Ferramenta **local** que escaneia uma pasta sincronizada do OneDrive/SharePoint,
+detecta problemas de conformidade (nomes/caminhos longos, caracteres proibidos,
+nomes reservados) e ajuda a corrigir **renomeando com IA** sob aprovação humana,
+com rollback.
 
-Este projeto é um **"robô organizador e faxineiro"**. Ele varre todas as suas pastas e arquivos de forma automática e gera um diagnóstico completo do que está fora das regras, preparando o terreno para a correção.
+## Stack
 
-## O que ele faz exatamente?
+- **Backend:** Python + FastAPI (`api.py`, `main.py`, `scanner/`, `remediation/`, `analytics/`)
+- **Frontend:** React + Vite + Tailwind (`web/`), buildado para `web/dist`
+- **IA:** Google Gemini 2.5 Flash-Lite (sugestões de renome)
 
-1. **Faz um Raio-X das pastas (Scanner):** Ele analisa todos os arquivos buscando nomes muito grandes, pastas profundas demais, itens duplicados e caracteres problemáticos.
-2. **Gera Relatórios e Resumos (Analytics):** Cria planilhas (CSV e Excel) e dados fáceis de entender, mostrando exatamente onde estão as bagunças.
-3. **Planeja a Correção (Remediation):** Em vez de sair renomeando tudo de forma bagunçada, o sistema cria um "Plano de Ação" inteligente para arrumar os nomes ruins. Ele permite que você simule as alterações antes de fazer de verdade.
-4. **Faz uma Faxina Segura (Rollback):** Se alguma correção der errado, ele possui um sistema para desfazer a alteração e voltar o arquivo ao nome original.
-5. **Separa Arquivos de Mídia (Media Manager):** Ele encontra arquivos pesados como vídeos e fotos em pastas que deveriam ser só de documentos, e os move para uma pasta separada, aliviando o espaço.
+## Pré-requisitos
 
-## 🛡️ Segurança em Primeiro Lugar
-O sistema foi construído pensando na segurança dos seus arquivos. Ele roda no modo "Simulação" (`DRY_RUN = True`) por padrão. Isso significa que ele **não apaga e nem altera nenhum arquivo original**; ele apenas analisa tudo e entrega os relatórios com as sugestões de correção. Nenhuma mudança definitiva acontece sem que alguém mande o sistema fazer de fato.
+- Python 3.11+ com as deps de `requirements.txt`
+- Node 18+ (para buildar o frontend)
+- `.env` na raiz com `GEMINI_API_KEY=...`
 
----
+## Como rodar
 
-## 🛠️ Para Desenvolvedores (Mapa do Código)
-Caso alguém vá mexer no código, aqui está como o projeto está dividido:
-- `main.py`: É o arquivo principal que você roda para iniciar o "robô".
-- `config.py`: Onde você altera as regras do jogo (como tamanho máximo de nomes, extensões para ignorar, etc).
-- `scanner/`: A parte do código que faz a investigação nas pastas.
-- `remediation/`: A "inteligência" que cria o plano para arrumar os nomes e gerencia reversões.
-- `analytics/`: O módulo que transforma os problemas encontrados em painéis e estatísticas.
-- `rules/`: Onde ficam guardados os dicionários do que pode e não pode na hora de dar nomes.
+```bash
+# 1. Backend (deps)
+pip install -r requirements.txt
+
+# 2. Frontend (build — gera web/dist que o FastAPI serve)
+cd web && npm install && npm run build && cd ..
+
+# 3. Servidor (serve API + UI na mesma porta)
+python -m uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+Abra **http://127.0.0.1:8000**.
+
+### Desenvolvimento do frontend (hot reload)
+
+```bash
+cd web && npm run dev      # http://localhost:5173, com proxy /api -> :8000
+```
+
+## Fluxo
+
+1. **Escanear** — varre a árvore (suporte a caminho longo `\\?\`, pula
+   `rules/exclusions.json`, respeita `rules/frozen_items.json`), analisa
+   conformidade OneDrive e gera relatório + analytics.
+2. **Visão geral** — problemas agrupados por tipo.
+3. **Renomeações IA** — candidatos de nome descritivo longo → Gemini sugere nome
+   curto e único → detecção de colisão → você aprova → aplica no disco (mais
+   fundo primeiro) → salva rollback em `outputs/remediation/`.
+4. **Analytics** — profundidade, duplicatas, categorias, padrões.
+
+## Configuração
+
+- `rules/onedrive_rules.json` — limites OneDrive. **`cloud_url_overhead`** ajusta
+  o limite efetivo de caminho (o OneDrive mede a URL da nuvem, ~49 chars mais
+  longa que o caminho local; por isso o limite real é ~351, não 400).
+- `rules/exclusions.json` — pastas (e conteúdo) totalmente fora do processo.
+- `rules/frozen_items.json` — arquivos/pastas compartilhados que **nunca** são
+  renomeados (aparecem como "Bloqueado").
+
+## Rollback
+
+Cada aplicação de renome gera `outputs/remediation/rollback_renames_*.csv`.
+Ferramentas em `tools/` consolidam/reconstroem o histórico de rollback.
+A limpeza do scan **nunca** apaga arquivos `rollback_*`.
+
+## Testes
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```

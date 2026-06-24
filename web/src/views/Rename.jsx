@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, dirname } from '../api'
 import { Card, Button, Badge, Stat, Spinner, Empty } from '../components/ui'
+import { toast } from '../components/toast'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -75,7 +76,7 @@ export default function Rename({ onChanged }) {
       await pollUntilDone(api.rename.status)
       await load()
     } catch (e) {
-      alert(e.message)
+      toast(e.message, 'error')
     } finally {
       setBusy(null)
       setProgress(null)
@@ -83,16 +84,16 @@ export default function Rename({ onChanged }) {
   }
 
   async function resolveCollisions() {
-    if (!stats.colisao) return alert('Não há nomes repetidos para resolver.')
+    if (!stats.colisao) return toast('Não há nomes repetidos para resolver.', 'info')
     if (!confirm(`Pedir à IA para reescrever ${stats.colisao} arquivo(s) que colidem, com nomes distintos?`)) return
     try {
       setBusy('Resolvendo colisões…')
       const r = await api.rename.resolveCollisions()
-      if (r.status === 'noop') return alert('Nenhuma colisão a resolver.')
+      if (r.status === 'noop') return toast('Nenhuma colisão a resolver.', 'info')
       await pollUntilDone(api.rename.resolveStatus)
       await load()
     } catch (e) {
-      alert(e.message)
+      toast(e.message, 'error')
     } finally {
       setBusy(null)
       setProgress(null)
@@ -101,7 +102,7 @@ export default function Rename({ onChanged }) {
 
   async function setStatus(r, status) {
     if (status === 'aprovada' && r._collision)
-      return alert('Esse nome colide com outro na mesma pasta. Edite ou resolva as colisões antes de aprovar.')
+      return toast('Esse nome colide com outro na mesma pasta. Edite ou resolva as colisões antes de aprovar.', 'error')
     const fn = status === 'aprovada' ? api.rename.approve : api.rename.reject
     await fn(r.full_path)
     setResults((prev) =>
@@ -112,7 +113,7 @@ export default function Rename({ onChanged }) {
   async function approveAll() {
     const targets = results.filter((r) => r.status === 'pendente' && !r._collision)
     const blocked = results.filter((r) => r.status === 'pendente' && r._collision).length
-    if (!targets.length) return alert('Nada aprovável.' + (blocked ? ` ${blocked} bloqueado(s) por colisão.` : ''))
+    if (!targets.length) return toast('Nada aprovável.' + (blocked ? ` ${blocked} bloqueado(s) por colisão.` : ''))
     if (!confirm(`Aprovar ${targets.length} sugestão(ões)?${blocked ? `\n${blocked} com nome repetido ficam de fora.` : ''}`)) return
     setBusy('Aprovando…')
     try {
@@ -135,23 +136,24 @@ export default function Rename({ onChanged }) {
       )
       setEditing(null)
     } catch (e) {
-      alert(e.message)
+      toast(e.message, 'error')
     }
   }
 
   async function apply() {
-    if (!stats.aprovada) return alert('Nenhuma sugestão aprovada.')
+    if (!stats.aprovada) return toast('Nenhuma sugestão aprovada.', 'info')
     if (!confirm(`Renomear ${stats.aprovada} arquivo(s) no disco? (rollback é salvo automaticamente)`)) return
     setBusy('Aplicando…')
     try {
       const r = await api.rename.apply()
-      alert(
-        `Renomeados: ${r.renamed}\nPulados (sumiram): ${r.skipped_missing}\nColisão: ${r.skipped_collision}\nErros: ${r.errors_count}\n\nRollback: ${r.rollback_manifest || '—'}`,
+      toast(
+        `Renomeados: ${r.renamed}\nPulados (sumiram): ${r.skipped_missing}\nColisão: ${r.skipped_collision}\nErros: ${r.errors_count}`,
+        r.errors_count ? 'error' : 'success',
       )
       await load()
       onChanged?.()
     } catch (e) {
-      alert(e.message)
+      toast(e.message, 'error')
     } finally {
       setBusy(null)
     }

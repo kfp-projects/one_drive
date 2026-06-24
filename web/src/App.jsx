@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from './api'
 import { Button, Spinner } from './components/ui'
+import { Toaster, toast } from './components/toast'
 import Overview from './views/Overview'
 import Rename from './views/Rename'
 import Analytics from './views/Analytics'
@@ -37,8 +38,9 @@ export default function App() {
       }
       setRefreshKey((k) => k + 1)
       setView('overview')
+      toast('Scan concluído.', 'success')
     } catch (e) {
-      alert('Falha no scan: ' + e.message)
+      toast('Falha no scan: ' + e.message, 'error')
     } finally {
       setScanning(false)
       setScanProgress(null)
@@ -116,6 +118,7 @@ export default function App() {
       </main>
 
       <footer className="mt-8 text-center text-xs text-slate-400">Organiza 2.0 · local</footer>
+      <Toaster />
     </div>
   )
 }

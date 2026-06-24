@@ -1,8 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import csv
 import os
@@ -534,22 +533,35 @@ def get_latest_analytics():
 
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
-# Serve a UI nova (web/dist, build do React/Vite); cai pra frontend/ antigo
-# enquanto a Fase 2 não estiver buildada.
-_WEB_DIST = os.path.join(_BASE, "web", "dist")
-FRONTEND_DIR = _WEB_DIST if os.path.isdir(_WEB_DIST) else os.path.join(_BASE, "frontend")
+# UI nova: build do React/Vite em web/dist.
+FRONTEND_DIR = os.path.join(_BASE, "web", "dist")
 
-if os.path.isdir(FRONTEND_DIR):
-    @app.get("/")
-    def serve_index():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+_NEED_BUILD_HTML = (
+    "<html><body style='font-family:system-ui;max-width:640px;margin:60px auto;"
+    "padding:0 20px;color:#0f172a'><h1>Organiza</h1><p>O frontend ainda não foi "
+    "buildado.</p><pre style='background:#f1f5f9;padding:14px;border-radius:8px'>"
+    "cd web\nnpm install\nnpm run build</pre><p>Depois recarregue esta página."
+    "</p></body></html>"
+)
 
-    @app.get("/{filename:path}")
-    def serve_frontend_file(filename: str):
-        if filename.startswith("api/"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        full_path = os.path.join(FRONTEND_DIR, filename)
-        if os.path.isfile(full_path):
-            return FileResponse(full_path)
-        # SPA fallback: rotas desconhecidas voltam pro index.
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+@app.get("/")
+def serve_index():
+    index = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return HTMLResponse(_NEED_BUILD_HTML)
+
+
+@app.get("/{filename:path}")
+def serve_frontend_file(filename: str):
+    if filename.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    full_path = os.path.join(FRONTEND_DIR, filename)
+    if os.path.isfile(full_path):
+        return FileResponse(full_path)
+    # SPA fallback: rotas desconhecidas voltam pro index (ou aviso de build).
+    index = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return HTMLResponse(_NEED_BUILD_HTML)

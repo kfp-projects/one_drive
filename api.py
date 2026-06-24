@@ -126,6 +126,7 @@ def api_apply_renames():
     skipped_unchanged = 0
     skipped_missing = 0
     errors = []
+    rollback_rows = []
 
     # Ordena por profundidade descendente: renomeia arquivos antes de pastas
     # pra não invalidar caminhos de filhos quando pai é renomeado.
@@ -138,6 +139,10 @@ def api_apply_renames():
     for record in records_sorted:
         if record.get("is_shared"):
             skipped_blocked += 1
+            continue
+        # Caminho longo NÃO é corrigido por regra (truncaria o nome). Vai pra IA,
+        # que encurta o nome com sentido. Pulamos aqui.
+        if "PATH_TOO_LONG" in (record.get("detected_problems", "") or ""):
             continue
         action = record.get("action_required", "")
         if action not in ("AUTO_RENAME", "SUGGEST_RENAME", "SUGGEST_RENAME_CAUTION", "RENAME"):
@@ -167,8 +172,28 @@ def api_apply_renames():
                 dst = src.parent / f"{stem} ({i}){ext}"
             os.rename(str(src), str(dst))
             renamed += 1
+            rollback_rows.append({
+                "original_path": str(src),
+                "new_path": str(dst),
+                "original_name": src.name,
+                "new_name": dst.name,
+            })
         except Exception as e:
             errors.append(f"{src.name}: {type(e).__name__}")
+
+    # Manifesto de rollback (mesmo formato do rename IA; nunca apagado no scan).
+    rollback_path = None
+    if rollback_rows:
+        os.makedirs(config.REMEDIATION_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rollback_path = os.path.join(config.REMEDIATION_DIR, f"rollback_renames_{ts}.csv")
+        try:
+            with open(rollback_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["original_path", "new_path", "original_name", "new_name"])
+                w.writeheader()
+                w.writerows(rollback_rows)
+        except Exception as e:
+            errors.append(f"rollback manifest: {type(e).__name__}")
 
     return {
         "renamed": renamed,
@@ -177,6 +202,7 @@ def api_apply_renames():
         "skipped_missing": skipped_missing,
         "errors_count": len(errors),
         "errors_sample": errors[:10],
+        "rollback_manifest": rollback_path,
     }
 
 

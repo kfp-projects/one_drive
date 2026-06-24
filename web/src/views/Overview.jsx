@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api, basename, dirname } from '../api'
-import { Card, Stat, Badge, Spinner, Empty } from '../components/ui'
+import { api, dirname } from '../api'
+import { Card, Stat, Badge, Button, Spinner, Empty } from '../components/ui'
+import { toast } from '../components/toast'
+
+function fixOf(rec) {
+  // Correção de REGRA disponível (instantânea)? Não bloqueado, sugestão
+  // diferente do original. Caminho longo é EXCLUÍDO daqui — vai pra IA
+  // (encurtar o nome com sentido em vez de truncar).
+  if (rec.is_shared) return null
+  if ((rec.detected_problems || '').includes('PATH_TOO_LONG')) return null
+  const s = rec.suggested_name
+  if (s && s !== rec.original_name) return s
+  return null
+}
 
 const PROBLEM_LABELS = {
   PATH_TOO_LONG: 'Caminho longo',
@@ -18,9 +30,10 @@ function problemsOf(rec) {
     .filter(Boolean)
 }
 
-export default function Overview({ refreshKey }) {
+export default function Overview({ refreshKey, onChanged }) {
   const [state, setState] = useState({ loading: true, data: null, error: null })
   const [filter, setFilter] = useState('')
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -35,6 +48,26 @@ export default function Overview({ refreshKey }) {
   }, [refreshKey])
 
   const issues = state.data?.data?.issues || []
+  const fixableCount = useMemo(() => issues.filter((r) => fixOf(r)).length, [issues])
+  const pathLongCount = useMemo(
+    () => issues.filter((r) => !r.is_shared && (r.detected_problems || '').includes('PATH_TOO_LONG')).length,
+    [issues],
+  )
+
+  async function applyFixes() {
+    if (!fixableCount) return
+    if (!confirm(`Aplicar ${fixableCount} correção(ões) automática(s) de conformidade? (rollback é salvo)`)) return
+    setBusy(true)
+    try {
+      const r = await api.applyComplianceFixes()
+      toast(`Corrigidos: ${r.renamed} · Erros: ${r.errors_count}`, r.errors_count ? 'error' : 'success')
+      onChanged?.()
+    } catch (e) {
+      toast(e.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const counts = useMemo(() => {
     const c = { total: issues.length, byCode: {}, shared: 0 }
@@ -82,6 +115,24 @@ export default function Overview({ refreshKey }) {
         {counts.shared > 0 && <Stat label="Bloqueados (compartilhados)" value={counts.shared} />}
       </div>
 
+      {fixableCount > 0 && (
+        <div className="flex flex-col gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-sm text-emerald-800">
+            <b>{fixableCount}</b> problema(s) têm correção automática (bordas, extensão dupla, caracteres) — sem IA, instantâneo.
+          </span>
+          <Button variant="success" disabled={busy} onClick={applyFixes}>
+            {busy ? <><Spinner className="border-white/40 border-t-white" /> Corrigindo…</> : `Corrigir ${fixableCount} automaticamente`}
+          </Button>
+        </div>
+      )}
+
+      {pathLongCount > 0 && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
+          <b>{pathLongCount}</b> arquivo(s) com <b>caminho longo</b> são corrigidos de forma inteligente na aba{' '}
+          <b>Renomeações IA</b> (a IA encurta o nome com sentido, sem truncar).
+        </div>
+      )}
+
       <Card>
         <div className="flex items-center justify-between gap-3 border-b border-slate-100 p-4">
           <h2 className="text-base font-semibold text-slate-800">Arquivos com problema</h2>
@@ -100,6 +151,9 @@ export default function Overview({ refreshKey }) {
                   {r.is_dir ? '📁 ' : ''}
                   {r.original_name}
                 </div>
+                {fixOf(r) && (
+                  <div className="truncate text-xs text-emerald-700">→ {fixOf(r)}</div>
+                )}
                 <div className="truncate text-xs text-slate-400" title={dirname(r.full_path)}>
                   {dirname(r.full_path)}
                 </div>

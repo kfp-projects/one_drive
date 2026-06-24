@@ -246,12 +246,14 @@ def load_descriptive_files_from_latest_report() -> list[dict]:
     with open(os.path.join(config.REPORTS_DIR, latest), "r", encoding="utf-8") as f:
         data = json.load(f)
     records = data.get("issues", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-    # Só arquivos descritivos longos E que NÃO sejam compartilhados/bloqueados.
-    # Itens compartilhados (frozen) nunca podem ser renomeados — ficam de fora
-    # do lote da IA por completo.
+    # Candidatos da IA: nomes descritivos longos OU caminho longo (a IA encurta
+    # o nome, o que encurta o caminho — correção inteligente em vez de truncar).
+    # Itens compartilhados (frozen) nunca entram.
     return [
         r for r in records
-        if r.get("nome_descritivo_longo") and not r.get("is_shared")
+        if (r.get("nome_descritivo_longo")
+            or "PATH_TOO_LONG" in (r.get("detected_problems", "") or ""))
+        and not r.get("is_shared")
     ]
 
 

@@ -478,6 +478,21 @@ def get_latest_report():
         }
     }
 
+@app.get("/api/analytics/latest")
+def get_latest_analytics():
+    """Devolve o JSON de inteligência analítica do último scan."""
+    ad = config.ANALYTICS_DIR
+    if not os.path.isdir(ad):
+        return {"status": "no_analytics"}
+    files = [f for f in os.listdir(ad) if f.startswith("analytics_") and f.endswith(".json")]
+    if not files:
+        return {"status": "no_analytics"}
+    latest = max(files, key=lambda x: os.path.getctime(os.path.join(ad, x)))
+    with open(os.path.join(ad, latest), "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {"status": "success", "data": data}
+
+
 _BASE = os.path.dirname(os.path.abspath(__file__))
 # Serve a UI nova (web/dist, build do React/Vite); cai pra frontend/ antigo
 # enquanto a Fase 2 não estiver buildada.

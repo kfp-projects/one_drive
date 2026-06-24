@@ -3,10 +3,12 @@ import { api } from './api'
 import { Button, Spinner } from './components/ui'
 import Overview from './views/Overview'
 import Rename from './views/Rename'
+import Analytics from './views/Analytics'
 
 const VIEWS = [
   { id: 'overview', label: 'Visão geral' },
   { id: 'rename', label: 'Renomeações IA' },
+  { id: 'analytics', label: 'Analytics' },
 ]
 
 export default function App() {
@@ -85,6 +87,7 @@ export default function App() {
         )}
         {view === 'overview' && <Overview refreshKey={refreshKey} />}
         {view === 'rename' && <Rename onChanged={() => setRefreshKey((k) => k + 1)} />}
+        {view === 'analytics' && <Analytics refreshKey={refreshKey} />}
       </main>
 
       <footer className="mt-8 text-center text-xs text-slate-400">Organiza 2.0 · local</footer>

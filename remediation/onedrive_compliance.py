@@ -19,6 +19,25 @@ from typing import Optional, Tuple, List
 
 _RULES = None
 
+# Extensões de arquivo "de verdade". Se o segmento interno de um nome com 2
+# pontos finais for uma destas, é provável extensão dupla suspeita
+# (ex.: nota.pdf.exe). Se não for, o ponto é parte do nome (data, sigla, versão).
+_KNOWN_EXTENSIONS = {
+    # documentos
+    "doc", "docx", "xls", "xlsx", "xlsm", "ppt", "pptx", "pdf", "txt", "rtf",
+    "csv", "odt", "ods", "odp",
+    # imagens
+    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "heic", "svg",
+    # áudio/vídeo
+    "mp3", "wav", "aac", "flac", "ogg", "m4a", "mp4", "mov", "avi", "mkv", "wmv", "flv",
+    # arquivos/compactados
+    "zip", "rar", "7z", "tar", "gz", "iso", "bak",
+    # executáveis/scripts (os mais perigosos numa extensão dupla)
+    "exe", "msi", "bat", "cmd", "com", "scr", "ps1", "sh", "vbs", "js", "jar",
+    # web/dados
+    "html", "htm", "xml", "json",
+}
+
 
 def _load_rules() -> dict:
     """Carrega rules/onedrive_rules.json uma única vez (lazy)."""
@@ -106,6 +125,16 @@ def _is_suspicious_double_extension(name: str) -> bool:
         return False
     if not (1 <= len(outer) <= max_inner and outer.isalnum()):
         return False
+    # Segurança PRIMEIRO: se o interno é extensão conhecida, é disfarce real
+    # (nota.pdf.exe, foto.JPG.scr) — sinaliza sempre, mesmo em caixa alta.
+    if inner.lower() in _KNOWN_EXTENSIONS:
+        return True
+    # Senão, excluir falsos positivos onde o ponto faz parte do NOME:
+    #  - data/versão numérica: "15.05.xlsx", "doc.2024.pdf"  (inner numérico)
+    #  - sigla em CAIXA ALTA:  "PE.CE.AL.BA.xlsm" (BA = Bahia)  (inner maiúsculo)
+    if inner.isdigit() or inner.isupper():
+        return False
+    # Resta minúsculo não-extensão: típico typo de extensão ("xl.xlsx").
     return True
 
 

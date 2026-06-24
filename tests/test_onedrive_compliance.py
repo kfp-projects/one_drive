@@ -12,7 +12,27 @@ import unittest
 # Permite rodar o arquivo direto sem instalar como pacote
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from remediation.onedrive_compliance import analyze
+from remediation.onedrive_compliance import analyze, _is_suspicious_double_extension
+
+
+class TestDoubleExtension(unittest.TestCase):
+    """Extensão dupla: datas/siglas NÃO são falsos positivos; reais são pegas."""
+
+    def test_data_nao_e_extensao_dupla(self):
+        self.assertFalse(_is_suspicious_double_extension("CONTAGEM KFP-BA - 15.05.xlsx"))
+
+    def test_siglas_nao_sao_extensao_dupla(self):
+        self.assertFalse(_is_suspicious_double_extension("CAIXA 05 2026 - PE.CE.AL.BA.xlsm"))
+
+    def test_executavel_disfarcado_e_flagado(self):
+        self.assertTrue(_is_suspicious_double_extension("nota.pdf.exe"))
+        self.assertTrue(_is_suspicious_double_extension("foto.jpg.scr"))
+
+    def test_dupla_real_txt_txt(self):
+        self.assertTrue(_is_suspicious_double_extension("EFD.042026.x.txt.txt"))
+
+    def test_extensao_simples_ok(self):
+        self.assertFalse(_is_suspicious_double_extension("relatorio.pdf"))
 
 
 class TestOneDriveCompliance(unittest.TestCase):

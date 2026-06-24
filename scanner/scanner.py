@@ -38,10 +38,12 @@ class ScannerService:
     Core service for scanning directories.
     Calculates path limits, detects duplicates, and simulates AI rules.
     """
-    def __init__(self, root_dir: str):
+    def __init__(self, root_dir: str, progress: dict = None):
         self.root_dir = Path(root_dir)
         self.records: List[Dict[str, Any]] = []
         self.pipeline = PipelineSim()
+        # dict compartilhado pra reportar progresso ao vivo (opcional).
+        self.progress = progress if progress is not None else {}
 
         self.stats = {
             "total_files": 0,
@@ -126,6 +128,7 @@ class ScannerService:
                 self.stats["total_folders"] += 1
                 if self.stats["total_folders"] % 1000 == 0:
                     logger.info(f"Progress: Scanned {self.stats['total_folders']} folders...")
+                    self.progress["folders"] = self.stats["total_folders"]
                 self._analyze_path(root_path / d, is_dir=True)
 
             for f in files:
@@ -133,8 +136,10 @@ class ScannerService:
                 if file_path.suffix.lower() in config.IGNORED_EXTENSIONS:
                     continue
                 self.stats["total_files"] += 1
-                if self.stats["total_files"] % 5000 == 0:
+                if self.stats["total_files"] % 2000 == 0:
                     logger.info(f"Progress: Scanned {self.stats['total_files']} files...")
+                    self.progress["files"] = self.stats["total_files"]
+                    self.progress["folders"] = self.stats["total_folders"]
                 self._analyze_path(file_path, is_dir=False)
                 
         logger.info("Scan completed.")

@@ -15,20 +15,33 @@ export default function App() {
   const [view, setView] = useState('overview')
   const [path, setPath] = useState('C:\\Users\\kfpno\\OneDrive - Kfp Distribuidora Ltda')
   const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
 
   async function runScan() {
     if (!path.trim()) return
     if (!confirm('Escanear esta pasta? Pode levar alguns minutos em árvores grandes.')) return
     setScanning(true)
+    setScanProgress({ phase: 'Iniciando', files: 0, folders: 0 })
     try {
       await api.scan(path.trim())
+      // Polling do progresso até concluir
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1200))
+        const s = await api.scanStatus()
+        setScanProgress(s)
+        if (!s.running) {
+          if (s.error) throw new Error(s.error)
+          break
+        }
+      }
       setRefreshKey((k) => k + 1)
       setView('overview')
     } catch (e) {
       alert('Falha no scan: ' + e.message)
     } finally {
       setScanning(false)
+      setScanProgress(null)
     }
   }
 
@@ -81,8 +94,20 @@ export default function App() {
 
       <main className="flex-1">
         {scanning && (
-          <div className="mb-4 flex items-center gap-3 rounded-lg bg-indigo-50 px-4 py-3 text-sm text-indigo-700">
-            <Spinner /> Escaneando a árvore de pastas… isso pode levar alguns minutos.
+          <div className="mb-4 rounded-lg bg-indigo-50 px-4 py-3 text-sm text-indigo-700">
+            <div className="flex items-center gap-3">
+              <Spinner />
+              <span className="font-medium">{scanProgress?.phase || 'Escaneando'}…</span>
+              {scanProgress && (scanProgress.files > 0 || scanProgress.folders > 0) && (
+                <span className="text-indigo-500">
+                  {scanProgress.files.toLocaleString('pt-BR')} arquivos · {scanProgress.folders.toLocaleString('pt-BR')} pastas
+                </span>
+              )}
+            </div>
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-indigo-100">
+              <div className="h-full w-1/3 animate-pulse rounded-full bg-indigo-500" />
+            </div>
+            <div className="mt-1 text-xs text-indigo-400">Árvores grandes (centenas de milhares de arquivos) levam alguns minutos.</div>
           </div>
         )}
         {view === 'overview' && <Overview refreshKey={refreshKey} />}

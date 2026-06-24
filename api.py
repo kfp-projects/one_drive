@@ -46,16 +46,56 @@ class ScanRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
+_scan_state = {
+    "running": False,
+    "phase": None,
+    "files": 0,
+    "folders": 0,
+    "error": None,
+    "done": False,
+}
+_scan_lock = threading.Lock()
+
+
 @app.post("/api/scan")
 def api_scan(request: ScanRequest):
     if not os.path.exists(request.path):
-        raise HTTPException(status_code=400, detail="Path does not exist")
+        raise HTTPException(status_code=400, detail="Caminho não existe")
+    with _scan_lock:
+        if _scan_state["running"]:
+            raise HTTPException(409, detail="Já existe um scan em andamento.")
+        _scan_state.update({"running": True, "phase": "Iniciando", "files": 0,
+                            "folders": 0, "error": None, "done": False})
 
-    try:
-        results = run_pipeline(request.path)
-        return {"status": "success", "data": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Thread referencia o mesmo dict de progresso pra status ao vivo.
+    progress = {"phase": "Iniciando", "files": 0, "folders": 0}
+
+    def worker():
+        try:
+            run_pipeline(request.path, progress=progress)
+            with _scan_lock:
+                _scan_state.update({"running": False, "done": True, "phase": "Concluído",
+                                    "files": progress.get("files", 0),
+                                    "folders": progress.get("folders", 0)})
+        except Exception as e:
+            with _scan_lock:
+                _scan_state.update({"running": False, "error": str(e), "phase": "Erro"})
+
+    # Atualizador: copia o progress vivo pro state a cada poll (via status).
+    _scan_state["_progress_ref"] = progress
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/scan/status")
+def api_scan_status():
+    with _scan_lock:
+        ref = _scan_state.get("_progress_ref")
+        if _scan_state["running"] and isinstance(ref, dict):
+            _scan_state["files"] = ref.get("files", 0)
+            _scan_state["folders"] = ref.get("folders", 0)
+            _scan_state["phase"] = ref.get("phase", _scan_state["phase"])
+        return {k: v for k, v in _scan_state.items() if k != "_progress_ref"}
 
 @app.post("/api/apply-renames")
 def api_apply_renames():

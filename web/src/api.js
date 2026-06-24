@@ -24,6 +24,7 @@ async function req(method, path, body) {
 
 export const api = {
   scan: (path) => req('POST', '/api/scan', { path }),
+  scanStatus: () => req('GET', '/api/scan/status'),
   latestReport: () => req('GET', '/api/reports/latest'),
   latestAnalytics: () => req('GET', '/api/analytics/latest'),
 

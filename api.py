@@ -532,6 +532,82 @@ def get_latest_analytics():
     return {"status": "success", "data": data}
 
 
+# =============================================================================
+# Navegador de pastas + gestão de exclusões (pra escolher caminho e excluir
+# pastas pela UI em vez de editar JSON na mão).
+# =============================================================================
+
+@app.get("/api/folders")
+def list_folders(path: str = ""):
+    """Lista subpastas de `path`. Sem path, devolve drives + pasta do usuário."""
+    import string
+    if not path:
+        home = os.path.expanduser("~")
+        starts = [{"name": "🏠 " + home, "path": home}]
+        for d in string.ascii_uppercase:
+            drive = f"{d}:\\"
+            if os.path.isdir(drive):
+                starts.append({"name": drive, "path": drive})
+        return {"path": "", "parent": None, "folders": starts}
+
+    if not os.path.isdir(path):
+        raise HTTPException(400, detail="Pasta não existe")
+    folders = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir():
+                        folders.append({"name": entry.name, "path": entry.path})
+                except OSError:
+                    continue
+    except PermissionError:
+        raise HTTPException(403, detail="Sem permissão para listar esta pasta")
+    folders.sort(key=lambda x: x["name"].lower())
+    parent = os.path.dirname(path.rstrip("\\/")) or None
+    if parent == path:
+        parent = None
+    return {"path": path, "parent": parent, "folders": folders[:1000]}
+
+
+def _read_exclusions() -> dict:
+    try:
+        with open(config.EXCLUSIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@app.get("/api/exclusions")
+def get_exclusions():
+    d = _read_exclusions()
+    return {
+        "excluded_folder_paths": d.get("excluded_folder_paths", []),
+        "excluded_folder_names": d.get("excluded_folder_names", []),
+    }
+
+
+class ExclusionsUpdate(BaseModel):
+    excluded_folder_paths: list[str] = []
+    excluded_folder_names: list[str] = []
+
+
+@app.post("/api/exclusions")
+def set_exclusions(req: ExclusionsUpdate):
+    d = _read_exclusions()  # preserva _doc/_como_usar
+    # dedup preservando ordem
+    d["excluded_folder_paths"] = list(dict.fromkeys(req.excluded_folder_paths))
+    d["excluded_folder_names"] = list(dict.fromkeys(req.excluded_folder_names))
+    os.makedirs(os.path.dirname(config.EXCLUSIONS_PATH), exist_ok=True)
+    with open(config.EXCLUSIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    return {
+        "status": "ok",
+        "excluded_folder_paths": d["excluded_folder_paths"],
+        "excluded_folder_names": d["excluded_folder_names"],
+    }
+
+
 _BASE = os.path.dirname(os.path.abspath(__file__))
 # UI nova: build do React/Vite em web/dist.
 FRONTEND_DIR = os.path.join(_BASE, "web", "dist")

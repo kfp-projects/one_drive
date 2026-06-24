@@ -76,7 +76,10 @@ export default function Rename({ onChanged }) {
       await pollUntilDone(api.rename.status)
       await load()
     } catch (e) {
-      toast(e.message, 'error')
+      // 0 candidatos não é erro — é sinal de que está tudo em conformidade.
+      if (/nenhum arquivo descritivo/i.test(e.message))
+        toast('Nada a renomear — todos os nomes já estão em conformidade. ✅', 'success')
+      else toast(e.message, 'error')
     } finally {
       setBusy(null)
       setProgress(null)

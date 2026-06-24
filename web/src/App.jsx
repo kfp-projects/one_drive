@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from './api'
 import { Button, Spinner } from './components/ui'
 import { Toaster, toast } from './components/toast'
+import FolderBrowser from './components/FolderBrowser'
+import Exclusions from './components/Exclusions'
 import Overview from './views/Overview'
 import Rename from './views/Rename'
 import Analytics from './views/Analytics'
@@ -18,26 +20,23 @@ export default function App() {
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [browsingPath, setBrowsingPath] = useState(false)
+  const [showExclusions, setShowExclusions] = useState(false)
 
-  async function runScan() {
-    if (!path.trim()) return
-    if (!confirm('Escanear esta pasta? Pode levar alguns minutos em árvores grandes.')) return
+  // Acompanha um scan em andamento até concluir (reusável: clique ou ao abrir).
+  async function followScan() {
     setScanning(true)
-    setScanProgress({ phase: 'Iniciando', files: 0, folders: 0 })
     try {
-      await api.scan(path.trim())
-      // Polling do progresso até concluir
       for (;;) {
-        await new Promise((r) => setTimeout(r, 1200))
         const s = await api.scanStatus()
         setScanProgress(s)
         if (!s.running) {
           if (s.error) throw new Error(s.error)
           break
         }
+        await new Promise((r) => setTimeout(r, 1200))
       }
       setRefreshKey((k) => k + 1)
-      setView('overview')
       toast('Scan concluído.', 'success')
     } catch (e) {
       toast('Falha no scan: ' + e.message, 'error')
@@ -45,6 +44,35 @@ export default function App() {
       setScanning(false)
       setScanProgress(null)
     }
+  }
+
+  // Ao abrir o app, detecta scan já em andamento (ex.: aberto em outra aba).
+  useEffect(() => {
+    api
+      .scanStatus()
+      .then((s) => {
+        if (s.running) followScan()
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function runScan() {
+    if (!path.trim()) return
+    if (scanning) return
+    if (!confirm('Escanear esta pasta? Pode levar alguns minutos em árvores grandes.')) return
+    setScanProgress({ phase: 'Iniciando', files: 0, folders: 0 })
+    try {
+      await api.scan(path.trim())
+    } catch (e) {
+      // Se já há um scan rodando, apenas acompanha em vez de falhar.
+      if (!/andamento/i.test(e.message)) {
+        toast('Falha no scan: ' + e.message, 'error')
+        return
+      }
+    }
+    setView('overview')
+    followScan()
   }
 
   return (
@@ -66,6 +94,7 @@ export default function App() {
             placeholder="Caminho da pasta a escanear…"
             className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 disabled:bg-slate-50"
           />
+          <Button disabled={scanning} onClick={() => setBrowsingPath(true)}>📂 Procurar</Button>
           <Button variant="primary" disabled={scanning} onClick={runScan}>
             {scanning ? (
               <>
@@ -76,7 +105,26 @@ export default function App() {
             )}
           </Button>
         </div>
+        <div className="mt-2">
+          <button onClick={() => setShowExclusions(true)} className="text-xs text-indigo-600 hover:underline">
+            ⚙ Gerenciar pastas excluídas do scan
+          </button>
+        </div>
       </header>
+
+      {browsingPath && (
+        <FolderBrowser
+          initial={path}
+          title="Escolher pasta para ESCANEAR"
+          pickLabel="Usar esta pasta"
+          onPick={(p) => {
+            setPath(p)
+            setBrowsingPath(false)
+          }}
+          onClose={() => setBrowsingPath(false)}
+        />
+      )}
+      {showExclusions && <Exclusions onClose={() => setShowExclusions(false)} />}
 
       <nav className="mb-5 flex gap-1 border-b border-slate-200">
         {VIEWS.map((v) => (

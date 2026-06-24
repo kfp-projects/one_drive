@@ -27,6 +27,9 @@ export const api = {
   scanStatus: () => req('GET', '/api/scan/status'),
   latestReport: () => req('GET', '/api/reports/latest'),
   latestAnalytics: () => req('GET', '/api/analytics/latest'),
+  folders: (path) => req('GET', `/api/folders?path=${encodeURIComponent(path || '')}`),
+  getExclusions: () => req('GET', '/api/exclusions'),
+  setExclusions: (data) => req('POST', '/api/exclusions', data),
 
   rename: {
     suggestSample: () => req('POST', '/api/rename/suggest-sample'),

@@ -160,7 +160,7 @@ export default function App() {
             <div className="mt-1 text-xs text-indigo-400">Árvores grandes (centenas de milhares de arquivos) levam alguns minutos.</div>
           </div>
         )}
-        {view === 'overview' && <Overview refreshKey={refreshKey} />}
+        {view === 'overview' && <Overview refreshKey={refreshKey} onChanged={() => setRefreshKey((k) => k + 1)} />}
         {view === 'rename' && <Rename onChanged={() => setRefreshKey((k) => k + 1)} />}
         {view === 'analytics' && <Analytics refreshKey={refreshKey} />}
       </main>

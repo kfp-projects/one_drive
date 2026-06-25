@@ -1,8 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import csv
 import os
@@ -17,7 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from main import run_pipeline, execute_media_move
+from main import run_pipeline
 from config import config
 
 app = FastAPI(title="Organiza API")
@@ -46,460 +45,56 @@ class ScanRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
+_scan_state = {
+    "running": False,
+    "phase": None,
+    "files": 0,
+    "folders": 0,
+    "error": None,
+    "done": False,
+}
+_scan_lock = threading.Lock()
+
+
 @app.post("/api/scan")
 def api_scan(request: ScanRequest):
     if not os.path.exists(request.path):
-        raise HTTPException(status_code=400, detail="Path does not exist")
+        raise HTTPException(status_code=400, detail="Caminho não existe")
+    with _scan_lock:
+        if _scan_state["running"]:
+            raise HTTPException(409, detail="Já existe um scan em andamento.")
+        _scan_state.update({"running": True, "phase": "Iniciando", "files": 0,
+                            "folders": 0, "error": None, "done": False})
 
-    try:
-        results = run_pipeline(request.path)
-        return {"status": "success", "data": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Thread referencia o mesmo dict de progresso pra status ao vivo.
+    progress = {"phase": "Iniciando", "files": 0, "folders": 0}
 
-@app.post("/api/execute")
-def api_execute(request: ScanRequest):
-    if config.DRY_RUN:
-        raise HTTPException(status_code=400, detail="Cannot execute in DRY_RUN mode")
-    try:
-        execute_media_move(request.path)
-        return {"status": "success", "message": "Media files moved successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# Classificação IA (Gemini) dos arquivos de mídia identificados
-# Roda em background com progresso polled via /classify/status.
-# =============================================================================
-
-_classify_state = {
-    "running": False,
-    "total": 0,
-    "done": 0,
-    "started_at": None,
-    "completed_at": None,
-    "error": None,
-    "results": [],  # acumula classificações
-    "cache_hits": 0,
-    "api_calls": 0,
-}
-_classify_lock = threading.Lock()
-
-# Cache persistente de classificações (chave: nome|tamanho_em_bytes).
-# Permite reuso entre execuções e entre cópias do mesmo arquivo em paths
-# diferentes (ex: testar localmente uma cópia da pasta OneDrive).
-CLASSIFY_CACHE_FILE = os.path.join(config.OUTPUT_DIR, "classify_cache.json")
-
-
-def _load_classify_cache() -> dict:
-    try:
-        with open(CLASSIFY_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_classify_cache(cache: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(CLASSIFY_CACHE_FILE), exist_ok=True)
-        with open(CLASSIFY_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def _cache_key_for_path(path_str: str) -> str | None:
-    try:
-        p = Path(path_str)
-        if not p.exists():
-            return None
-        return f"{p.name.lower()}|{p.stat().st_size}"
-    except OSError:
-        return None
-
-
-def _build_media_list_from_manifest() -> list[dict]:
-    """Lê o manifesto CSV mais recente e devolve só os IMAGENS que ainda existem."""
-    if not os.path.isdir(config.REMEDIATION_DIR):
-        return []
-    manifests = sorted(
-        [f for f in os.listdir(config.REMEDIATION_DIR)
-         if f.startswith("media_offload_manifest_") and f.endswith(".csv")],
-        key=lambda f: os.path.getctime(os.path.join(config.REMEDIATION_DIR, f)),
-        reverse=True,
-    )
-    if not manifests:
-        return []
-
-    # Importa só aqui pra não criar dependência hard se a lib não estiver instalada
-    try:
-        from image_cleaner import IMAGE_EXTENSIONS
-    except Exception:
-        IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".heic"}
-
-    out = []
-    with open(os.path.join(config.REMEDIATION_DIR, manifests[0]), "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            src = (row.get("original_path") or "").strip()
-            if not src or not os.path.exists(src):
-                continue
-            ext = os.path.splitext(src)[1].lower()
-            if ext not in IMAGE_EXTENSIONS:
-                continue
-            out.append({
-                "path": src,
-                "source_folder": row.get("source_folder", ""),
-            })
-    return out
-
-
-def _classify_worker(api_key: str, items: list[dict]) -> None:
-    """Worker em thread separada — paraleliza chamadas Gemini com pool.
-    Checa cache (nome|tamanho) antes de cada chamada à API."""
-    try:
-        from google import genai
-        from image_cleaner import (
-            classify_with_retry, make_thumbnail,
-            detect_folder_category, THUMBNAIL_SIZE,
-        )
-
-        client = genai.Client(api_key=api_key)
-        cache = _load_classify_cache()
-        cache_lock = threading.Lock()
-
-        def classify_one(item):
-            try:
-                path = Path(item["path"])
-                if not path.exists():
-                    return None
-
-                # Tenta cache primeiro — economiza chamada de API se o mesmo
-                # arquivo (por nome+tamanho) já foi classificado antes.
-                ck = _cache_key_for_path(str(path))
-                if ck and ck in cache:
-                    cached = cache[ck]
-                    with _classify_lock:
-                        _classify_state["cache_hits"] += 1
-                    return {
-                        "path": str(path),
-                        "name": path.name,
-                        "decisao": cached["decisao"],
-                        "confianca": cached.get("confianca", 0),
-                        "motivo": cached.get("motivo", ""),
-                        "categoria_detectada": cached.get("categoria_detectada", ""),
-                        "source_folder": item.get("source_folder", ""),
-                        "from_cache": True,
-                    }
-
-                thumb = make_thumbnail(path, THUMBNAIL_SIZE)
-                if thumb is None:
-                    return None
-                category = detect_folder_category(path)
-                data = classify_with_retry(client, thumb, str(path), category, max_attempts=2)
-                result = {
-                    "path": str(path),
-                    "name": path.name,
-                    "decisao": str(data.get("decisao", "")).upper(),
-                    "confianca": int(data.get("confianca", 0)),
-                    "motivo": (data.get("motivo") or "")[:100],
-                    "categoria_detectada": data.get("categoria_detectada", "") or "",
-                    "source_folder": item.get("source_folder", ""),
-                    "from_cache": False,
-                }
-                with _classify_lock:
-                    _classify_state["api_calls"] += 1
-                if ck:
-                    with cache_lock:
-                        cache[ck] = {
-                            "decisao": result["decisao"],
-                            "confianca": result["confianca"],
-                            "motivo": result["motivo"],
-                            "categoria_detectada": result["categoria_detectada"],
-                        }
-                return result
-            except Exception:
-                return None
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(classify_one, it) for it in items]
-            for fut in as_completed(futures):
-                result = fut.result()
-                with _classify_lock:
-                    if result:
-                        _classify_state["results"].append(result)
-                    _classify_state["done"] += 1
-
-        # Salva cache atualizado no disco
-        _save_classify_cache(cache)
-
-        with _classify_lock:
-            _classify_state["running"] = False
-            _classify_state["completed_at"] = datetime.now().isoformat()
-    except Exception as e:
-        with _classify_lock:
-            _classify_state["running"] = False
-            _classify_state["error"] = f"{type(e).__name__}: {e}"
-            _classify_state["completed_at"] = datetime.now().isoformat()
-
-
-@app.post("/api/classify/start")
-def classify_start():
-    """Inicia a classificação IA dos arquivos de mídia do último scan."""
-    with _classify_lock:
-        if _classify_state["running"]:
-            raise HTTPException(409, detail="Classificação já em andamento")
-
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(400, detail="GEMINI_API_KEY não configurada no .env")
-
-    items = _build_media_list_from_manifest()
-    if not items:
-        raise HTTPException(400, detail="Nenhuma imagem para classificar. Rode um scan primeiro.")
-
-    # Antes de descartar resultados em memória, salva no cache (por nome+tamanho)
-    # pra reuso na próxima execução — inclui o caso "copiei a pasta pra testar".
-    with _classify_lock:
-        existing = list(_classify_state.get("results") or [])
-    if existing:
-        cache = _load_classify_cache()
-        for r in existing:
-            ck = _cache_key_for_path(r.get("path", ""))
-            if ck:
-                cache[ck] = {
-                    "decisao": r["decisao"],
-                    "confianca": r.get("confianca", 0),
-                    "motivo": r.get("motivo", ""),
-                    "categoria_detectada": r.get("categoria_detectada", ""),
-                }
-        _save_classify_cache(cache)
-
-    with _classify_lock:
-        _classify_state["running"] = True
-        _classify_state["total"] = len(items)
-        _classify_state["done"] = 0
-        _classify_state["results"] = []
-        _classify_state["started_at"] = datetime.now().isoformat()
-        _classify_state["completed_at"] = None
-        _classify_state["error"] = None
-        _classify_state["cache_hits"] = 0
-        _classify_state["api_calls"] = 0
-
-    threading.Thread(
-        target=_classify_worker, args=(api_key, items), daemon=True
-    ).start()
-
-    return {"status": "started", "total": len(items)}
-
-
-@app.get("/api/classify/status")
-def classify_status():
-    """Polled pelo frontend pra atualizar a barra de progresso."""
-    with _classify_lock:
-        total = _classify_state["total"]
-        done = _classify_state["done"]
-        return {
-            "running": _classify_state["running"],
-            "total": total,
-            "done": done,
-            "percent": (done / total * 100) if total else 0,
-            "error": _classify_state["error"],
-            "started_at": _classify_state["started_at"],
-            "completed_at": _classify_state["completed_at"],
-            "cache_hits": _classify_state.get("cache_hits", 0),
-            "api_calls": _classify_state.get("api_calls", 0),
-        }
-
-
-@app.get("/api/classify/results")
-def classify_results():
-    """Retorna os IRRELEVANTES já classificados (ordenados por confiança desc)."""
-    with _classify_lock:
-        results = list(_classify_state["results"])
-        running = _classify_state["running"]
-
-    irrelevant = sorted(
-        [r for r in results if r.get("decisao") == "IRRELEVANTE"],
-        key=lambda r: r.get("confianca", 0),
-        reverse=True,
-    )
-    relevant_count = sum(1 for r in results if r.get("decisao") == "RELEVANTE")
-
-    return {
-        "running": running,
-        "total_classified": len(results),
-        "irrelevant_count": len(irrelevant),
-        "relevant_count": relevant_count,
-        "irrelevant": irrelevant,
-    }
-
-
-def _derive_scan_root() -> str | None:
-    """Deriva o caminho raiz do último scan a partir do manifesto."""
-    if not os.path.isdir(config.REMEDIATION_DIR):
-        return None
-    manifests = sorted(
-        [f for f in os.listdir(config.REMEDIATION_DIR)
-         if f.startswith("media_offload_manifest_") and f.endswith(".csv")],
-        key=lambda f: os.path.getctime(os.path.join(config.REMEDIATION_DIR, f)),
-        reverse=True,
-    )
-    if not manifests:
-        return None
-    latest = os.path.join(config.REMEDIATION_DIR, manifests[0])
-    try:
-        with open(latest, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                np = row.get("new_path", "")
-                if "_ARQUIVOS_PESADOS_MEDIA" in np:
-                    # new_path tem formato: <root>/_ARQUIVOS_PESADOS_MEDIA/...
-                    idx = np.index("_ARQUIVOS_PESADOS_MEDIA")
-                    return np[:idx].rstrip("\\/")
-    except Exception:
-        pass
-    return None
-
-
-@app.post("/api/move-irrelevant-to-image-trash")
-def api_move_irrelevant_to_image_trash():
-    """
-    Move os arquivos classificados como IRRELEVANTE pela IA para
-    <raiz_do_scan>/backup de imagens/, preservando a estrutura de subpastas.
-    Operação real (não simulação). Reversível (arquivos só são MOVIDOS).
-    """
-    with _classify_lock:
-        results = list(_classify_state["results"])
-
-    irrelevant = [r for r in results if r.get("decisao") == "IRRELEVANTE"]
-    if not irrelevant:
-        raise HTTPException(400, detail="Nenhum item irrelevante para mover. Rode a classificação primeiro.")
-
-    root_str = _derive_scan_root()
-    if not root_str:
-        raise HTTPException(400, detail="Não consegui derivar a raiz do scan. Rode um scan primeiro.")
-
-    root = Path(root_str).resolve()
-    if not root.exists():
-        raise HTTPException(400, detail=f"Raiz do scan não existe: {root}")
-
-    trash_dir = root / "backup de imagens"
-    trash_dir.mkdir(parents=True, exist_ok=True)
-
-    moved = 0
-    skipped_missing = 0
-    errors = []
-
-    for r in irrelevant:
-        src = Path(r.get("path", ""))
-        if not src.exists():
-            skipped_missing += 1
-            continue
+    def worker():
         try:
-            rel = src.relative_to(root)
-        except ValueError:
-            rel = Path(src.name)
-        dst = trash_dir / rel
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                stem, suffix = dst.stem, dst.suffix
-                i = 1
-                while (dst.parent / f"{stem} ({i}){suffix}").exists():
-                    i += 1
-                dst = dst.parent / f"{stem} ({i}){suffix}"
-            shutil.move(str(src), str(dst))
-            moved += 1
+            run_pipeline(request.path, progress=progress)
+            with _scan_lock:
+                _scan_state.update({"running": False, "done": True, "phase": "Concluído",
+                                    "files": progress.get("files", 0),
+                                    "folders": progress.get("folders", 0)})
         except Exception as e:
-            errors.append(f"{src.name}: {type(e).__name__}")
+            with _scan_lock:
+                _scan_state.update({"running": False, "error": str(e), "phase": "Erro"})
 
-    return {
-        "moved": moved,
-        "skipped_missing": skipped_missing,
-        "errors_count": len(errors),
-        "errors_sample": errors[:10],
-        "destination": str(trash_dir),
-    }
+    # Atualizador: copia o progress vivo pro state a cada poll (via status).
+    _scan_state["_progress_ref"] = progress
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "started"}
 
 
-@app.post("/api/move-all-audio-to-trash")
-def api_move_all_audio_to_trash():
-    """
-    Move TODOS os arquivos de áudio identificados no último scan para
-    <raiz_do_scan>/backup de audios/, preservando a estrutura de subpastas.
-    SEM análise por IA — todos vão. Operação real, reversível.
-    """
-    if not os.path.isdir(config.REMEDIATION_DIR):
-        raise HTTPException(400, detail="Nenhum scan encontrado. Rode um scan primeiro.")
-
-    manifests = sorted(
-        [f for f in os.listdir(config.REMEDIATION_DIR)
-         if f.startswith("media_offload_manifest_") and f.endswith(".csv")],
-        key=lambda f: os.path.getctime(os.path.join(config.REMEDIATION_DIR, f)),
-        reverse=True,
-    )
-    if not manifests:
-        raise HTTPException(400, detail="Nenhum plano de mídia encontrado.")
-
-    root_str = _derive_scan_root()
-    if not root_str:
-        raise HTTPException(400, detail="Não consegui derivar a raiz do scan.")
-
-    root = Path(root_str).resolve()
-    if not root.exists():
-        raise HTTPException(400, detail=f"Raiz do scan não existe: {root}")
-
-    trash_dir = root / "backup de audios"
-    trash_dir.mkdir(parents=True, exist_ok=True)
-
-    AUDIO_EXTS = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a"}
-
-    moved = 0
-    skipped_missing = 0
-    errors = []
-
-    latest_path = os.path.join(config.REMEDIATION_DIR, manifests[0])
-    with open(latest_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            src_str = (row.get("original_path") or "").strip()
-            if not src_str:
-                continue
-            src = Path(src_str)
-            ext = src.suffix.lower()
-            if ext not in AUDIO_EXTS:
-                continue
-            if not src.exists():
-                skipped_missing += 1
-                continue
-            try:
-                rel = src.relative_to(root)
-            except ValueError:
-                rel = Path(src.name)
-            dst = trash_dir / rel
-            try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.exists():
-                    stem, suffix = dst.stem, dst.suffix
-                    i = 1
-                    while (dst.parent / f"{stem} ({i}){suffix}").exists():
-                        i += 1
-                    dst = dst.parent / f"{stem} ({i}){suffix}"
-                shutil.move(str(src), str(dst))
-                moved += 1
-            except Exception as e:
-                errors.append(f"{src.name}: {type(e).__name__}")
-
-    return {
-        "moved": moved,
-        "skipped_missing": skipped_missing,
-        "errors_count": len(errors),
-        "errors_sample": errors[:10],
-        "destination": str(trash_dir),
-    }
-
+@app.get("/api/scan/status")
+def api_scan_status():
+    with _scan_lock:
+        ref = _scan_state.get("_progress_ref")
+        if _scan_state["running"] and isinstance(ref, dict):
+            _scan_state["files"] = ref.get("files", 0)
+            _scan_state["folders"] = ref.get("folders", 0)
+            _scan_state["phase"] = ref.get("phase", _scan_state["phase"])
+        return {k: v for k, v in _scan_state.items() if k != "_progress_ref"}
 
 @app.post("/api/apply-renames")
 def api_apply_renames():
@@ -531,6 +126,7 @@ def api_apply_renames():
     skipped_unchanged = 0
     skipped_missing = 0
     errors = []
+    rollback_rows = []
 
     # Ordena por profundidade descendente: renomeia arquivos antes de pastas
     # pra não invalidar caminhos de filhos quando pai é renomeado.
@@ -543,6 +139,10 @@ def api_apply_renames():
     for record in records_sorted:
         if record.get("is_shared"):
             skipped_blocked += 1
+            continue
+        # Caminho longo NÃO é corrigido por regra (truncaria o nome). Vai pra IA,
+        # que encurta o nome com sentido. Pulamos aqui.
+        if "PATH_TOO_LONG" in (record.get("detected_problems", "") or ""):
             continue
         action = record.get("action_required", "")
         if action not in ("AUTO_RENAME", "SUGGEST_RENAME", "SUGGEST_RENAME_CAUTION", "RENAME"):
@@ -572,8 +172,28 @@ def api_apply_renames():
                 dst = src.parent / f"{stem} ({i}){ext}"
             os.rename(str(src), str(dst))
             renamed += 1
+            rollback_rows.append({
+                "original_path": str(src),
+                "new_path": str(dst),
+                "original_name": src.name,
+                "new_name": dst.name,
+            })
         except Exception as e:
             errors.append(f"{src.name}: {type(e).__name__}")
+
+    # Manifesto de rollback (mesmo formato do rename IA; nunca apagado no scan).
+    rollback_path = None
+    if rollback_rows:
+        os.makedirs(config.REMEDIATION_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rollback_path = os.path.join(config.REMEDIATION_DIR, f"rollback_renames_{ts}.csv")
+        try:
+            with open(rollback_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["original_path", "new_path", "original_name", "new_name"])
+                w.writeheader()
+                w.writerows(rollback_rows)
+        except Exception as e:
+            errors.append(f"rollback manifest: {type(e).__name__}")
 
     return {
         "renamed": renamed,
@@ -582,73 +202,10 @@ def api_apply_renames():
         "skipped_missing": skipped_missing,
         "errors_count": len(errors),
         "errors_sample": errors[:10],
+        "rollback_manifest": rollback_path,
     }
 
 
-@app.post("/api/move-media-to-trash")
-def api_move_to_trash():
-    """
-    Move os arquivos de mídia do último plano para a lixeira (pasta especial).
-    Operação reversível — nada é deletado. Bypassa DRY_RUN porque é segura.
-    Lê o manifesto CSV gerado pelo último scan.
-    """
-    if not os.path.isdir(config.REMEDIATION_DIR):
-        raise HTTPException(
-            status_code=400,
-            detail="Nenhuma varredura encontrada. Rode um scan primeiro.",
-        )
-
-    manifests = sorted(
-        [
-            f for f in os.listdir(config.REMEDIATION_DIR)
-            if f.startswith("media_offload_manifest_") and f.endswith(".csv")
-        ],
-        key=lambda f: os.path.getctime(os.path.join(config.REMEDIATION_DIR, f)),
-        reverse=True,
-    )
-    if not manifests:
-        raise HTTPException(
-            status_code=400,
-            detail="Nenhum plano de mídia encontrado. Rode um scan primeiro.",
-        )
-
-    latest_path = os.path.join(config.REMEDIATION_DIR, manifests[0])
-    moved = 0
-    skipped_missing = 0
-    errors = []
-
-    with open(latest_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            src = (row.get("original_path") or "").strip()
-            dst = (row.get("new_path") or "").strip()
-            if not src or not dst:
-                continue
-            if not os.path.exists(src):
-                skipped_missing += 1
-                continue
-            try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                # Se já existe no destino (re-execução), gera sufixo numérico
-                if os.path.exists(dst):
-                    base, ext = os.path.splitext(dst)
-                    i = 1
-                    while os.path.exists(f"{base} ({i}){ext}"):
-                        i += 1
-                    dst = f"{base} ({i}){ext}"
-                shutil.move(src, dst)
-                moved += 1
-            except Exception as e:
-                errors.append(f"{os.path.basename(src)}: {type(e).__name__}")
-
-    return {
-        "status": "success",
-        "moved": moved,
-        "skipped_missing": skipped_missing,
-        "errors_count": len(errors),
-        "errors_sample": errors[:10],
-        "manifest_used": manifests[0],
-    }
 
 # =============================================================================
 # Sugestões de renome para "nomes descritivos longos" via Gemini Flash-Lite
@@ -664,17 +221,6 @@ from remediation.rename_suggester import (
 from remediation.onedrive_compliance import analyze as onedrive_analyze
 
 _rename_state = SuggestState()
-
-
-def _ensure_no_classify_running() -> None:
-    """Bloqueio mútuo: classificação de imagens e sugestão de renome dividem
-    a mesma cota da API Gemini. Roda só um por vez."""
-    with _classify_lock:
-        if _classify_state.get("running"):
-            raise HTTPException(
-                409,
-                detail="Aguarde a classificação de imagens terminar antes de gerar sugestões de renomeação.",
-            )
 
 
 def _start_rename_worker(files: list[dict], mode: str) -> dict:
@@ -710,7 +256,6 @@ def _start_rename_worker(files: list[dict], mode: str) -> dict:
 @app.post("/api/rename/suggest-sample")
 def rename_suggest_sample():
     """Gera sugestões para uma amostra aleatória de 50 arquivos descritivos."""
-    _ensure_no_classify_running()
     all_files = load_descriptive_files_from_latest_report()
     sample = rename_select_sample(all_files, n=50)
     return _start_rename_worker(sample, mode="sample")
@@ -719,7 +264,6 @@ def rename_suggest_sample():
 @app.post("/api/rename/suggest-all")
 def rename_suggest_all():
     """Gera sugestões para TODOS os arquivos descritivos do último scan."""
-    _ensure_no_classify_running()
     all_files = load_descriptive_files_from_latest_report()
     return _start_rename_worker(all_files, mode="all")
 
@@ -737,7 +281,6 @@ _disambig_state = SuggestState()
 @app.post("/api/rename/resolve-collisions")
 def rename_resolve_collisions():
     """Reescreve os grupos que colidem com nomes distintos (IA vê o grupo todo)."""
-    _ensure_no_classify_running()
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(400, detail="GEMINI_API_KEY não configurada no .env")
@@ -1000,20 +543,127 @@ def get_latest_report():
         }
     }
 
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+@app.get("/api/analytics/latest")
+def get_latest_analytics():
+    """Devolve o JSON de inteligência analítica do último scan."""
+    ad = config.ANALYTICS_DIR
+    if not os.path.isdir(ad):
+        return {"status": "no_analytics"}
+    files = [f for f in os.listdir(ad) if f.startswith("analytics_") and f.endswith(".json")]
+    if not files:
+        return {"status": "no_analytics"}
+    latest = max(files, key=lambda x: os.path.getctime(os.path.join(ad, x)))
+    with open(os.path.join(ad, latest), "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {"status": "success", "data": data}
 
-if os.path.isdir(FRONTEND_DIR):
-    @app.get("/")
-    def serve_index():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+# =============================================================================
+# Navegador de pastas + gestão de exclusões (pra escolher caminho e excluir
+# pastas pela UI em vez de editar JSON na mão).
+# =============================================================================
 
-    @app.get("/{filename:path}")
-    def serve_frontend_file(filename: str):
-        if filename.startswith("api/"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        full_path = os.path.join(FRONTEND_DIR, filename)
-        if os.path.isfile(full_path):
-            return FileResponse(full_path)
+@app.get("/api/folders")
+def list_folders(path: str = ""):
+    """Lista subpastas de `path`. Sem path, devolve drives + pasta do usuário."""
+    import string
+    if not path:
+        home = os.path.expanduser("~")
+        starts = [{"name": "🏠 " + home, "path": home}]
+        for d in string.ascii_uppercase:
+            drive = f"{d}:\\"
+            if os.path.isdir(drive):
+                starts.append({"name": drive, "path": drive})
+        return {"path": "", "parent": None, "folders": starts}
+
+    if not os.path.isdir(path):
+        raise HTTPException(400, detail="Pasta não existe")
+    folders = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir():
+                        folders.append({"name": entry.name, "path": entry.path})
+                except OSError:
+                    continue
+    except PermissionError:
+        raise HTTPException(403, detail="Sem permissão para listar esta pasta")
+    folders.sort(key=lambda x: x["name"].lower())
+    parent = os.path.dirname(path.rstrip("\\/")) or None
+    if parent == path:
+        parent = None
+    return {"path": path, "parent": parent, "folders": folders[:1000]}
+
+
+def _read_exclusions() -> dict:
+    try:
+        with open(config.EXCLUSIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@app.get("/api/exclusions")
+def get_exclusions():
+    d = _read_exclusions()
+    return {
+        "excluded_folder_paths": d.get("excluded_folder_paths", []),
+        "excluded_folder_names": d.get("excluded_folder_names", []),
+    }
+
+
+class ExclusionsUpdate(BaseModel):
+    excluded_folder_paths: list[str] = []
+    excluded_folder_names: list[str] = []
+
+
+@app.post("/api/exclusions")
+def set_exclusions(req: ExclusionsUpdate):
+    d = _read_exclusions()  # preserva _doc/_como_usar
+    # dedup preservando ordem
+    d["excluded_folder_paths"] = list(dict.fromkeys(req.excluded_folder_paths))
+    d["excluded_folder_names"] = list(dict.fromkeys(req.excluded_folder_names))
+    os.makedirs(os.path.dirname(config.EXCLUSIONS_PATH), exist_ok=True)
+    with open(config.EXCLUSIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    return {
+        "status": "ok",
+        "excluded_folder_paths": d["excluded_folder_paths"],
+        "excluded_folder_names": d["excluded_folder_names"],
+    }
+
+
+_BASE = os.path.dirname(os.path.abspath(__file__))
+# UI nova: build do React/Vite em web/dist.
+FRONTEND_DIR = os.path.join(_BASE, "web", "dist")
+
+_NEED_BUILD_HTML = (
+    "<html><body style='font-family:system-ui;max-width:640px;margin:60px auto;"
+    "padding:0 20px;color:#0f172a'><h1>Organiza</h1><p>O frontend ainda não foi "
+    "buildado.</p><pre style='background:#f1f5f9;padding:14px;border-radius:8px'>"
+    "cd web\nnpm install\nnpm run build</pre><p>Depois recarregue esta página."
+    "</p></body></html>"
+)
+
+
+@app.get("/")
+def serve_index():
+    index = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return HTMLResponse(_NEED_BUILD_HTML)
+
+
+@app.get("/{filename:path}")
+def serve_frontend_file(filename: str):
+    if filename.startswith("api/"):
         raise HTTPException(status_code=404, detail="Not Found")
+    full_path = os.path.join(FRONTEND_DIR, filename)
+    if os.path.isfile(full_path):
+        return FileResponse(full_path)
+    # SPA fallback: rotas desconhecidas voltam pro index (ou aviso de build).
+    index = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return HTMLResponse(_NEED_BUILD_HTML)
